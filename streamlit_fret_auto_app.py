@@ -13,27 +13,12 @@ import plotly.graph_objects as go
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 
-st.set_page_config(page_title="FRET Correlogram Analyzer", layout="wide")
-
-st.title("FRET Correlogram Analyzer (Origin .dat → plots & fits)")
-
-with st.expander("About this app", expanded=False):
-    st.markdown(
-        """
-        This Streamlit app ingests Origin-like `.dat` files that contain a 2D correlogram
-        (e.g., **S vs E** for FRET stoichiometry vs. efficiency). It will:
-
-        - Parse European decimal commas and tab/space separations
-        - Display the 2D heatmap (interactive)
-        - Compute **marginals** (sum over rows/cols)
-        - Extract a **ridge** (per-column maxima) and fit a line or polynomial
-        - Optionally fit **1- or 2-exponential** curves to any chosen row/column trace
-        - Export results and figures
-        """
-    )
+st.set_page_config(page_title="FRET Analyzer: Correlogram + Histograms", layout="wide")
+st.title("FRET Analyzer")
+st.caption("Upload Origin-like `.dat` matrices for S vs. E AND/OR 1D vectors for histogramming & Gaussian fits.")
 
 def parse_origin_like_dat(file_bytes: bytes):
-    """Parse an Origin-like .dat correlogram with EU decimal commas & tab separation.
+    """Parse an Origin-like .dat correlogram with EU decimal commas & tab/space separation.
     Returns: (df: DataFrame [n_rows x n_cols], metadata_lines: list[str])
     """
     text = file_bytes.decode("ascii", errors="ignore")
@@ -56,227 +41,170 @@ def parse_origin_like_dat(file_bytes: bytes):
         try:
             row = [float(p) for p in parts]
         except ValueError:
-            # If any non-numeric sneaks in, skip line
             continue
         rows.append(row)
         max_len = max(max_len, len(row))
 
-    # Pad ragged rows with NaN if needed
     rows = [r + [math.nan] * (max_len - len(r)) for r in rows] if rows else []
     df = pd.DataFrame(rows)
     return df, metadata
 
-uploaded = st.file_uploader("Upload `.dat` correlogram file", type=["dat", "txt", "csv"])
+def gaussian(x, y0, mu, sigma, A):
+    # A is the AREA under the Gaussian peak (not the amplitude).
+    # amplitude = A / (sigma * np.sqrt(2*np.pi))
+    amp = A / (sigma * np.sqrt(2*np.pi))
+    return y0 + amp * np.exp(-0.5 * ((x - mu)/sigma)**2)
 
-default_sigma = 0.8
-default_poly_order = 2
-default_smooth = 1.0
+def r2_score(y, yhat):
+    y = np.asarray(y)
+    yhat = np.asarray(yhat)
+    ss_res = np.nansum((y - yhat)**2)
+    ss_tot = np.nansum((y - np.nanmean(y))**2)
+    return 1 - ss_res/ss_tot if ss_tot > 0 else np.nan
 
-left, right = st.columns([0.4, 0.6])
+tabs = st.tabs(["Correlogram (S vs E)", "Histogram + Gaussian Fit"])
 
-if uploaded is not None:
-    with st.status("Parsing file...", expanded=False):
+# -------------------- Correlogram tab --------------------
+with tabs[0]:
+    st.subheader("Upload `.dat` correlogram")
+    uploaded = st.file_uploader("Upload Matrix `.dat` (Origin-like numeric table)", type=["dat","txt","csv"], key="corr")
+    if uploaded is not None:
         df, meta = parse_origin_like_dat(uploaded.getvalue())
-        st.write("Detected matrix shape:", df.shape)
+        st.write("Matrix shape:", df.shape)
         if meta:
-            st.write("Metadata lines found (first 5 shown):")
-            st.code("\n".join(meta[:5]) or "(none)")
+            with st.expander("Metadata (first 5 lines)"):
+                st.code("\n".join(meta[:5]))
 
-    st.divider()
-
-    with left:
-        st.subheader("Heatmap controls")
-        zmin = st.number_input("zmin (optional, 0 = auto)", value=0.0)
-        zmax = st.number_input("zmax (optional, 0 = auto)", value=0.0)
-        smoothing = st.slider("Gaussian smoothing (σ)", min_value=0.0, max_value=5.0, value=default_smooth, step=0.1)
-
-        df_np = df.to_numpy(dtype=float)
+        left, right = st.columns([0.4, 0.6])
+        with left:
+            zmin = st.number_input("zmin (0 = auto)", value=0.0)
+            zmax = st.number_input("zmax (0 = auto)", value=0.0)
+            smoothing = st.slider("Gaussian smoothing (σ)", 0.0, 5.0, 1.0, 0.1)
+        df_np = df.to_numpy(float)
         if smoothing > 0:
             df_plot = gaussian_filter1d(df_np, sigma=smoothing, axis=0)
             df_plot = gaussian_filter1d(df_plot, sigma=smoothing, axis=1)
         else:
             df_plot = df_np.copy()
-
         zmin_use = None if zmin <= 0 else zmin
         zmax_use = None if zmax <= 0 else zmax
 
-    with right:
-        st.subheader("Correlogram")
-        fig = px.imshow(
-            df_plot,
-            origin="lower",
-            aspect="auto",
-            color_continuous_scale="Viridis",
-            zmin=zmin_use,
-            zmax=zmax_use,
-            labels=dict(x="E bins (columns)", y="S bins (rows)", color="Counts"),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        with right:
+            fig = px.imshow(df_plot, origin="lower", aspect="auto",
+                            color_continuous_scale="Viridis",
+                            zmin=zmin_use, zmax=zmax_use,
+                            labels=dict(x="E bins (columns)", y="S bins (rows)", color="Counts"))
+            st.plotly_chart(fig, use_container_width=True)
 
-    st.divider()
-    st.subheader("Marginals & Ridge Extraction")
+        st.divider()
+        st.subheader("Marginals & Ridge")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            col_m = np.nansum(df_np, axis=0)
+            fig_col = go.Figure()
+            fig_col.add_trace(go.Scatter(y=col_m, mode="lines", name="col marginal"))
+            st.plotly_chart(fig_col, use_container_width=True)
+        with col2:
+            row_m = np.nansum(df_np, axis=1)
+            fig_row = go.Figure()
+            fig_row.add_trace(go.Scatter(y=row_m, mode="lines", name="row marginal"))
+            st.plotly_chart(fig_row, use_container_width=True)
+        with col3:
+            ridge_y = np.nanargmax(df_np, axis=0)
+            ridge_x = np.arange(df_np.shape[1])
+            fig_ridge = go.Figure()
+            fig_ridge.add_trace(go.Scatter(x=ridge_x, y=ridge_y, mode="markers+lines", name="ridge"))
+            st.plotly_chart(fig_ridge, use_container_width=True)
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        col_marg = np.nansum(df_np, axis=0)
-        st.markdown("**Column marginal** (sum over rows)")
-        fig_col = go.Figure()
-        fig_col.add_trace(go.Scatter(y=col_marg, mode="lines", name="col marginal"))
-        st.plotly_chart(fig_col, use_container_width=True)
-    with col2:
-        row_marg = np.nansum(df_np, axis=1)
-        st.markdown("**Row marginal** (sum over columns)")
-        fig_row = go.Figure()
-        fig_row.add_trace(go.Scatter(y=row_marg, mode="lines", name="row marginal"))
-        st.plotly_chart(fig_row, use_container_width=True)
-    with col3:
-        st.markdown("**Ridge (per-column maxima)**")
-        # For each column, take the row index of the maximum
-        ridge_y = np.nanargmax(df_np, axis=0)
-        ridge_x = np.arange(df_np.shape[1])
-        fig_ridge = go.Figure()
-        fig_ridge.add_trace(go.Scatter(x=ridge_x, y=ridge_y, mode="markers+lines", name="ridge"))
-        st.plotly_chart(fig_ridge, use_container_width=True)
+        st.info("Use the next tab to build histograms from any row/column or upload a 1D vector.")
 
-    st.info("Tip: If your S/E axes are known (bin edges), you can supply them below to map indices → physical units.")
+# -------------------- Histogram tab --------------------
+with tabs[1]:
+    st.subheader("Histogram & Gaussian Fit")
+    st.write("Source of data for histogram:")
+    source = st.radio("", ["Upload 1D values file", "Use column/row from a matrix file"], horizontal=True)
 
-    with st.expander("Optional: Provide bin edges for S (rows) and E (cols)"):
-        s_edges_str = st.text_area("S (rows) bin edges (comma or space-separated)", value="")
-        e_edges_str = st.text_area("E (cols) bin edges (comma or space-separated)", value="")
-
-        def parse_edges(s):
-            s = s.strip().replace(",", " ")
-            if not s:
-                return None
-            try:
-                return np.array([float(x) for x in re.split(r"\s+", s) if x])
-            except:
-                return None
-
-        s_edges = parse_edges(s_edges_str)
-        e_edges = parse_edges(e_edges_str)
-
-        if s_edges is not None and e_edges is not None:
-            if len(s_edges) == df_np.shape[0] + 1 and len(e_edges) == df_np.shape[1] + 1:
-                st.success("Using provided bin edges to compute physical coordinates.")
-                # For ridge, convert indices to bin centers
-                s_centers = 0.5 * (s_edges[:-1] + s_edges[1:])
-                e_centers = 0.5 * (e_edges[:-1] + e_edges[1:])
-                ridge_y_phys = s_centers[ridge_y]
-                ridge_x_phys = e_centers
+    values = None
+    if source == "Upload 1D values file":
+        one_d = st.file_uploader("Upload a 1D list (txt/csv). One number per line or separated by tabs/spaces/commas.", type=["txt","csv","dat"], key="vec")
+        if one_d is not None:
+            raw = one_d.getvalue().decode("utf-8", errors="ignore").replace(",", ".")
+            tokens = re.split(r"[\s,;]+", raw.strip())
+            vals = []
+            for t in tokens:
+                try:
+                    vals.append(float(t))
+                except:
+                    pass
+            if len(vals) > 0:
+                values = np.array(vals, dtype=float)
+    else:
+        # from matrix
+        uploaded2 = st.file_uploader("Upload Matrix `.dat` (Origin-like numeric table)", type=["dat","txt","csv"], key="corr2")
+        if uploaded2 is not None:
+            df2, _ = parse_origin_like_dat(uploaded2.getvalue())
+            mode = st.radio("Pick trace", ["Column (fix E)", "Row (fix S)", "All values (flatten)"], horizontal=True)
+            if mode == "Column (fix E)":
+                idx = st.number_input("Column index", 0, df2.shape[1]-1, min(10, df2.shape[1]-1))
+                values = df2.iloc[:, int(idx)].to_numpy(dtype=float)
+            elif mode == "Row (fix S)":
+                idx = st.number_input("Row index", 0, df2.shape[0]-1, min(10, df2.shape[0]-1))
+                values = df2.iloc[int(idx), :].to_numpy(dtype=float)
             else:
-                st.warning("Edge lengths do not match matrix shape (need rows+1 and cols+1). Using indices instead.")
-                ridge_y_phys, ridge_x_phys = ridge_y, ridge_x
-        else:
-            ridge_y_phys, ridge_x_phys = ridge_y, ridge_x
+                values = df2.to_numpy(dtype=float).ravel()
+                values = values[np.isfinite(values)]
 
-    st.subheader("Ridge Fitting")
-    fit_kind = st.selectbox("Fit model", ["Line: y = m*x + b", "Polynomial (order 2)", "Polynomial (order 3)"])
-
-    # Handle NaNs
-    mask = ~(np.isnan(ridge_x_phys) | np.isnan(ridge_y_phys))
-    X = np.asarray(ridge_x_phys)[mask]
-    Y = np.asarray(ridge_y_phys)[mask]
-
-    if len(X) > 3:
-        if fit_kind == "Line: y = m*x + b":
-            A = np.vstack([X, np.ones_like(X)]).T
-            m, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-            Y_fit = m * X + b
-            coeffs = dict(model="line", m=float(m), b=float(b))
-        else:
-            order = 2 if "order 2" in fit_kind else 3
-            p = np.polyfit(X, Y, order)
-            Y_fit = np.polyval(p, X)
-            coeffs = dict(model=f"poly{order}", coeffs=[float(c) for c in p.tolist()])
-
-        st.write("Fit coefficients:", coeffs)
-        fig_fit = go.Figure()
-        fig_fit.add_trace(go.Scatter(x=X, y=Y, mode="markers", name="ridge points"))
-        fig_fit.add_trace(go.Scatter(x=X, y=Y_fit, mode="lines", name="fit"))
-        st.plotly_chart(fig_fit, use_container_width=True)
+    if values is None:
+        st.info("Upload or pick a source to build the histogram.")
     else:
-        st.warning("Not enough ridge points to fit.")
+        st.write(f"Loaded {len(values)} values.")
+        c1, c2 = st.columns(2)
+        with c1:
+            nbins = st.slider("Number of bins", 10, 200, 50, 1)
+            xmin = st.number_input("xmin", value=float(np.nanmin(values)), format="%.6f")
+            xmax = st.number_input("xmax", value=float(np.nanmax(values)), format="%.6f")
+        with c2:
+            do_kde = st.checkbox("Show smoothed curve (KDE-like)", value=True)
+            smooth_sigma = st.slider("Smoothing σ (for displayed curve)", 0.0, 10.0, 1.5, 0.1)
 
-    st.divider()
-    st.subheader("Trace extraction & decay fitting (optional)")
+        # histogram
+        hist, edges = np.histogram(values[np.isfinite(values)], bins=nbins, range=(xmin, xmax), density=True)
+        centers = 0.5 * (edges[:-1] + edges[1:])
 
-    st.markdown("Pick a column (E fixed) or row (S fixed), then fit 1- or 2-exponential to its values.")
+        figh = go.Figure()
+        figh.add_trace(go.Bar(x=centers, y=hist, width=np.diff(edges), name="Histogram", opacity=0.5))
+        if do_kde:
+            sm = gaussian_filter1d(hist, sigma=smooth_sigma) if smooth_sigma > 0 else hist
+            figh.add_trace(go.Scatter(x=centers, y=sm, mode="lines", name="Smoothed"))
+        figh.update_layout(xaxis_title="Value", yaxis_title="Density")
+        st.plotly_chart(figh, use_container_width=True)
 
-    trace_mode = st.radio("Trace along", ["Column (vary S, fix E)", "Row (vary E, fix S)"], horizontal=True)
-    if trace_mode.startswith("Column"):
-        idx = st.number_input("Column index", min_value=0, max_value=df_np.shape[1]-1, value=min(10, df_np.shape[1]-1), step=1)
-        x = np.arange(df_np.shape[0])
-        y = df_np[:, int(idx)]
-        x_label = "S index"
-    else:
-        idx = st.number_input("Row index", min_value=0, max_value=df_np.shape[0]-1, value=min(10, df_np.shape[0]-1), step=1)
-        x = np.arange(df_np.shape[1])
-        y = df_np[int(idx), :]
-        x_label = "E index"
-
-    y_sm = gaussian_filter1d(y, sigma=0.8) if np.isfinite(y).any() else y
-
-    fit_model = st.selectbox("Decay model", ["None", "Single exponential: A*exp(-x/tau)+C", "Double exponential: A1*exp(-x/tau1)+A2*exp(-x/tau2)+C"])
-
-    def single_exp(x, A, tau, C):
-        return A * np.exp(-x / tau) + C
-
-    def double_exp(x, A1, tau1, A2, tau2, C):
-        return A1 * np.exp(-x / tau1) + A2 * np.exp(-x / tau2) + C
-
-    fig_trace = go.Figure()
-    fig_trace.add_trace(go.Scatter(x=x, y=y, mode="markers", name="raw trace"))
-    fig_trace.add_trace(go.Scatter(x=x, y=y_sm, mode="lines", name="smoothed"))
-    fit_summary = None
-
-    if fit_model != "None" and np.isfinite(y_sm).sum() >= 5:
+        st.markdown("### Gaussian fit")
+        # initial guesses
+        y0_0 = max(1e-6, float(np.min(hist)))
+        mu_0 = float(np.average(centers, weights=hist+1e-12))
+        sigma_0 = float(np.sqrt(np.average((centers-mu_0)**2, weights=hist+1e-12)))
+        A_0 = float(np.sum(hist) * (edges[-1]-edges[0]))
         try:
-            x_fit = x[np.isfinite(y_sm)]
-            y_fit = y_sm[np.isfinite(y_sm)]
-            if fit_model.startswith("Single"):
-                p0 = [float(np.nanmax(y_fit)), max(1.0, len(x_fit)/5.0), float(np.nanmin(y_fit))]
-                popt, pcov = curve_fit(single_exp, x_fit, y_fit, p0=p0, maxfev=10000)
-                yhat = single_exp(x, *popt)
-                perr = np.sqrt(np.diag(pcov))
-                fit_summary = {"model": "single_exp", "params": dict(A=popt[0], tau=popt[1], C=popt[2]), "stderr": dict(A=perr[0], tau=perr[1], C=perr[2])}
-            else:
-                p0 = [float(np.nanmax(y_fit))*0.6, max(1.0, len(x_fit)/8.0), float(np.nanmax(y_fit))*0.4, max(1.0, len(x_fit)/3.0), float(np.nanmin(y_fit))]
-                bounds = (-np.inf, np.inf)
-                popt, pcov = curve_fit(double_exp, x_fit, y_fit, p0=p0, bounds=bounds, maxfev=20000)
-                yhat = double_exp(x, *popt)
-                perr = np.sqrt(np.diag(pcov))
-                fit_summary = {
-                    "model": "double_exp",
-                    "params": dict(A1=popt[0], tau1=popt[1], A2=popt[2], tau2=popt[3], C=popt[4]),
-                    "stderr": dict(A1=perr[0], tau1=perr[1], A2=perr[2], tau2=perr[3], C=perr[4]),
-                }
+            popt, pcov = curve_fit(gaussian, centers, hist, p0=[y0_0, mu_0, max(sigma_0, 1e-6), A_0], maxfev=20000)
+            perr = np.sqrt(np.diag(pcov))
+            yhat = gaussian(centers, *popt)
+            rr = r2_score(hist, yhat)
 
-            fig_trace.add_trace(go.Scatter(x=x, y=yhat, mode="lines", name="fit"))
+            table = pd.DataFrame({
+                "Parameter": ["y0", "xc (mu)", "w (sigma)", "A (area)", "R^2"],
+                "Value": [popt[0], popt[1], popt[2], popt[3], rr],
+                "Std.Err": [perr[0], perr[1], perr[2], perr[3], np.nan],
+            })
+            st.dataframe(table, use_container_width=True)
+
+            # overlay fit
+            xfit = np.linspace(edges[0], edges[-1], 800)
+            yfit = gaussian(xfit, *popt)
+            figh2 = go.Figure()
+            figh2.add_trace(go.Bar(x=centers, y=hist, width=np.diff(edges), name="Histogram", opacity=0.45))
+            figh2.add_trace(go.Scatter(x=xfit, y=yfit, mode="lines", name="Gaussian fit"))
+            figh2.update_layout(xaxis_title="Value", yaxis_title="Density")
+            st.plotly_chart(figh2, use_container_width=True)
         except Exception as e:
-            st.warning(f"Fit failed: {e}")
-
-    st.plotly_chart(fig_trace, use_container_width=True)
-    if fit_summary is not None:
-        st.json(fit_summary)
-
-    st.divider()
-    st.subheader("Export")
-
-    export_col1, export_col2 = st.columns(2)
-    with export_col1:
-        if st.button("Prepare ridge CSV"):
-
-            ridge_df = pd.DataFrame({"x": X, "y": Y})
-            st.download_button("Download ridge.csv", data=ridge_df.to_csv(index=False).encode("utf-8"), file_name="ridge.csv", mime="text/csv")
-        if st.button("Prepare marginals CSV"):
-            marg = pd.DataFrame({"col_marg": col_marg, "row_marg": row_marg})
-            st.download_button("Download marginals.csv", data=marg.to_csv(index=False).encode("utf-8"), file_name="marginals.csv", mime="text/csv")
-
-    with export_col2:
-        # Save the heatmap as static image via Plotly JSON export (users can re-open in Plotly)
-        heatmap_json = fig.to_json()
-        st.download_button("Download heatmap (plotly.json)", data=heatmap_json.encode("utf-8"), file_name="heatmap.plotly.json", mime="application/json")
-
-else:
-    st.info("Upload your `.dat` file to get started.")
+            st.warning(f"Gaussian fit failed: {e}")
