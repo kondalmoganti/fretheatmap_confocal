@@ -4,97 +4,290 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 
-st.set_page_config(page_title="FRET Analyzer – Joint View", layout="wide")
-st.title("FRET Analyzer (Joint Heatmap + Marginals)")
+st.set_page_config(page_title="FRET Analyzer – FULL (merged)", layout="wide")
+st.title("FRET Analyzer – FULL (merged build)")
 
-def split_numeric_blocks(text: str):
+# ---------- Parsing ----------
+def split_numeric_blocks_with_headers(text: str):
     text = text.replace(",", ".")
     lines = text.splitlines()
     blocks = []
     cur = []
-    num_re = re.compile(r'^\s*[\d\.eE\-\+]+([\s\t,;][\d\.eE\-\+]+)*\s*$')
-    def flush():
+    header_buf = []
+    start_idx = None
+
+    def is_num(ln):
+        return re.match(r'^\s*[\d\.eE\-\+]+([\s\t,;][\d\.eE\-\+]+)*\s*$', ln) is not None
+
+    def flush(end_idx):
+        nonlocal cur, header_buf, start_idx
         if not cur: return
         s = "\n".join(cur).strip()
         try:
             df = pd.read_csv(io.StringIO(s), sep=r"[\s,;]+", engine="python", header=None)
-            blocks.append(df)
+            blocks.append((df, list(header_buf), start_idx, end_idx))
         except Exception:
             pass
-    for ln in lines:
-        if num_re.match(ln):
+        cur = []
+        start_idx = None
+
+    for i, ln in enumerate(lines):
+        if is_num(ln):
+            if start_idx is None:
+                start_idx = i
             cur.append(ln)
         else:
-            flush(); cur = []
-    flush()
+            header_buf.append(ln.strip())
+            header_buf = header_buf[-3:]
+            if start_idx is not None:
+                flush(i-1)
+    if start_idx is not None:
+        flush(len(lines)-1)
     return blocks
 
-uploaded = st.file_uploader("Upload your .dat file", type=["dat","txt","csv"], key="uploader_joint")
+# ---------- Models & helpers ----------
+def gaussian(x, y0, mu, sigma, A):
+    amp = A / (sigma * np.sqrt(2*np.pi))
+    return y0 + amp * np.exp(-0.5 * ((x - mu)/sigma)**2)
+
+def r2_score(y, yhat):
+    y = np.asarray(y); yhat = np.asarray(yhat)
+    ss_res = np.nansum((y - yhat)**2); ss_tot = np.nansum((y - np.nanmean(y))**2)
+    return 1 - ss_res/ss_tot if ss_tot>0 else np.nan
+
+def auto_bins(x, rule="Freedman–Diaconis", nb_fallback=80):
+    x = x[np.isfinite(x)]
+    n = x.size
+    if n < 2: return nb_fallback
+    if rule == "Freedman–Diaconis":
+        iqr = np.subtract(*np.percentile(x, [75, 25]))
+        if iqr == 0: return max(10, min(200, int(np.sqrt(n))))
+        bw = 2 * iqr * (n ** (-1/3))
+    elif rule == "Scott":
+        std = np.nanstd(x, ddof=1)
+        if std == 0: return max(10, min(200, int(np.sqrt(n))))
+        bw = 3.5 * std * (n ** (-1/3))
+    else:
+        return max(10, min(200, int(np.ceil(np.log2(n) + 1))))
+    rng = np.nanmax(x) - np.nanmin(x)
+    if rng <= 0: return max(10, min(200, int(np.sqrt(n))))
+    nb = int(np.clip(np.ceil(rng / bw), 10, 200))
+    return nb
+
+def smart_fit(centers, hist, xmin, xmax):
+    z = np.asarray(hist, float); x = np.asarray(centers, float)
+    m = np.isfinite(z) & np.isfinite(x)
+    x, z = x[m], z[m]
+    if x.size < 8 or np.count_nonzero(z) < 5:
+        return None
+    zs = gaussian_filter1d(z, sigma=max(1, int(len(z)*0.02)))
+    argmax = int(np.argmax(zs))
+    mu0 = float(x[argmax])
+    from scipy.ndimage import binary_dilation
+    mask = binary_dilation(zs >= 0.08*zs.max(), iterations=2)
+    xw, zw = x[mask], z[mask]
+    if xw.size < 8: xw, zw = x, z
+    q25, q75 = np.quantile(xw, [0.25, 0.75])
+    sigma0 = max(1e-3, (q75 - q25) / 1.349)
+    y00 = max(1e-6, float(np.median(z[(z <= np.percentile(z, 20))])))
+    A0 = float(np.trapz(zw - np.minimum(zw, y00), xw))
+    binw = np.median(np.diff(x))
+    lower = [0.0, xmin, max(binw*0.7, 1e-4), 0.0]
+    upper = [max(z.max()*2, 1.0), xmax, (xmax-xmin)/1.5, np.inf]
+    for mul in (1.0, 0.7, 1.3, 0.5, 1.8):
+        p0 = [y00, mu0, sigma0*mul, max(A0, 1e-4)]
+        try:
+            popt, pcov = curve_fit(gaussian, xw, zw, p0=p0, bounds=(lower, upper), maxfev=80000)
+            perr = np.sqrt(np.diag(pcov))
+            R2 = r2_score(z, gaussian(x, *popt))
+            return popt, perr, R2
+        except Exception:
+            continue
+    return None
+
+def clean_pair(x, w):
+    x = np.asarray(x, float); w = np.asarray(w, float)
+    m = np.isfinite(x) & np.isfinite(w) & (w >= 0)
+    return x[m], w[m]
+
+# ---------- UI ----------
+uploaded = st.file_uploader("Upload your .dat file", type=["dat","txt","csv"], key="uploader_merged")
 if uploaded is None:
-    st.info("Upload a file to continue.")
+    st.info("Upload your file to continue.")
     st.stop()
 
 raw = uploaded.getvalue().decode("utf-8", errors="ignore")
-blocks = split_numeric_blocks(raw)
+blocks = split_numeric_blocks_with_headers(raw)
 
-# pick a heatmap-like block (>= 10x10)
-mats = [i for i, df in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
-if not mats:
-    st.error("No heatmap-like (matrix) block detected in this file.")
-    st.stop()
+tabs = st.tabs(["Heatmap", "Histogram (single)", "Overlay: Classical vs PIE", "Joint (Heatmap + Marginals)"])
 
-sel = st.selectbox("Choose matrix block for heatmap", mats, format_func=lambda i: f"Block {i} (shape {blocks[i].shape})", key="joint_block")
-M = blocks[sel].astype(float).replace([np.inf, -np.inf], np.nan).to_numpy()
+# ---- Heatmap ----
+with tabs[0]:
+    st.subheader("Correlogram Heatmap")
+    mats = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
+    if not mats: mats = list(range(len(blocks)))
+    sel = st.selectbox("Choose block", mats, key="hm_block_m",
+                       format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
+    dfm = blocks[sel][0].astype(float).replace([np.inf, -np.inf], np.nan)
+    zmin = st.number_input("zmin (0=auto)", value=0.0, key="hm_zmin_m")
+    zmax = st.number_input("zmax (0=auto)", value=0.0, key="hm_zmax_m")
+    smooth = st.slider("Gaussian smoothing (σ)", 0.0, 6.0, 1.0, 0.1, key="hm_smooth_m")
+    arr = dfm.to_numpy()
+    if smooth>0:
+        arrp = gaussian_filter1d(gaussian_filter1d(arr, sigma=smooth, axis=0), sigma=smooth, axis=1)
+    else:
+        arrp = arr
+    fig = px.imshow(arrp, origin="lower", aspect="auto", color_continuous_scale="Viridis",
+                    zmin=None if zmin<=0 else zmin, zmax=None if zmax<=0 else zmax,
+                    labels=dict(x="E bins (columns)", y="S bins (rows)", color="Counts"))
+    st.plotly_chart(fig, use_container_width=True)
 
-smooth = st.slider("Gaussian smoothing (σ, 0=off)", 0.0, 6.0, 1.0, 0.1, key="joint_smooth")
-if smooth>0:
-    Mplot = gaussian_filter1d(gaussian_filter1d(M, sigma=smooth, axis=0), sigma=smooth, axis=1)
-else:
-    Mplot = M.copy()
+# ---- Histogram (single) ----
+with tabs[1]:
+    st.subheader("Histogram + Gaussian fit (single dataset)")
+    tbls = list(range(len(blocks)))
+    sel = st.selectbox("Choose block", tbls, index=tbls[-1] if tbls else 0,
+                       key="single_block_m",
+                       format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
+    dft = blocks[sel][0].copy()
+    templ = st.radio("Column template", ["Generic (C0..)", "FRET 8-cols (named)"], index=1, key="single_template_m")
+    if templ == "FRET 8-cols (named)" and dft.shape[1] >= 8:
+        base_names = ["Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
+                      "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE"]
+        extra = [f"Extra_{i}" for i in range(dft.shape[1]-8)]
+        dft.columns = base_names + extra
+    else:
+        dft.columns = [f"C{j}" for j in range(dft.shape[1])]
+    st.dataframe(dft.head(12), use_container_width=True)
 
-# derive marginals *from the heatmap itself* (ensures strict consistency)
-e_marginal = np.nansum(Mplot, axis=0)  # sum over rows -> E (x-axis) marginal
-s_marginal = np.nansum(Mplot, axis=1)  # sum over cols -> S (y-axis) marginal
+    c1,c2,c3,c4 = st.columns(4)
+    with c1: x_col = st.selectbox("Values column (x)", dft.columns, index=0, key="single_xcol_m")
+    with c2: w_col = st.selectbox("Weights (optional)", ["(none)"]+list(dft.columns), index=0, key="single_wcol_m")
+    with c3: rule  = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="single_rule_m")
+    with c4: auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="single_autofit_m")
 
-# Bin centers as indices (0..n-1); if you know physical edges you can replace here
-nx, ny = Mplot.shape[1], Mplot.shape[0]
-e_centers = np.arange(nx)
-s_centers = np.arange(ny)
+    x = pd.to_numeric(dft[x_col], errors="coerce").to_numpy()
+    w = None
+    if w_col != "(none)":
+        w = pd.to_numeric(dft[w_col], errors="coerce").to_numpy()
+        w = np.where(np.isfinite(w) & (w>0), w, 0.0)
 
-# Build a 2x2 layout: top E marginal, left-bottom heatmap, right S marginal (horizontal), top-right empty
-fig = make_subplots(
-    rows=2, cols=2,
-    specs=[[{"type":"xy"}, {"type":"xy"}],
-           [{"type":"heatmap"}, {"type":"xy"}]],
-    column_widths=[0.8, 0.2], row_heights=[0.25, 0.75],
-    horizontal_spacing=0.02, vertical_spacing=0.02
-)
+    m = np.isfinite(x)
+    xmin = float(np.nanmin(x[m])); xmax = float(np.nanmax(x[m]))
+    nb = auto_bins(x[m], rule=rule)
+    edges = np.linspace(xmin, xmax, nb+1)
+    centers = 0.5*(edges[:-1]+edges[1:])
+    hist, _ = np.histogram(x[m], bins=edges, weights=w if w is not None else None, density=True)
 
-# Top E marginal (row 1, col 1)
-fig.add_trace(go.Bar(x=e_centers, y=e_marginal, name="E marginal", opacity=0.6), row=1, col=1)
+    figH = go.Figure()
+    figH.add_bar(x=centers, y=hist, width=np.diff(edges), name="Histogram", opacity=0.55)
 
-# Heatmap (row 2, col 1)
-fig.add_trace(go.Heatmap(z=Mplot, coloraxis="coloraxis", showscale=True), row=2, col=1)
+    if auto_fit:
+        fit = smart_fit(centers, hist, xmin, xmax)
+        if fit:
+            p, perr, R2 = fit
+            xs = np.linspace(xmin, xmax, 800)
+            figH.add_trace(go.Scatter(x=xs, y=gaussian(xs, *p), mode="lines", name=f"Gaussian fit (R²={R2:.3f})"))
+    figH.update_layout(xaxis_title="Value", yaxis_title="Density")
+    st.plotly_chart(figH, use_container_width=True)
 
-# Right S marginal (horizontal) (row 2, col 2)
-fig.add_trace(go.Bar(y=s_centers, x=s_marginal, orientation="h", name="S marginal", opacity=0.6), row=2, col=2)
+# ---- Overlay: Classical vs PIE ----
+with tabs[2]:
+    st.subheader("Overlay: Classical vs PIE (E and S)")
+    cand = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[1] >= 8]
+    if not cand:
+        st.info("No table with ≥ 8 columns found.")
+    else:
+        sel = st.selectbox("Choose the 8+ column block", cand, key="ov_block_m",
+                           format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
+        dfX = blocks[sel][0].copy()
+        base_names = ["Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
+                      "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE"]
+        extra = [f"Extra_{i}" for i in range(max(0, dfX.shape[1]-8))]
+        dfX.columns = base_names + extra
 
-# Match axes so bars align with heatmap bins
-fig.update_xaxes(matches="x", row=1, col=1)   # top x matches heatmap x
-fig.update_xaxes(matches=None, row=2, col=2)  # independent x for right marginal
-fig.update_yaxes(matches="y", row=2, col=2)   # right y matches heatmap y
+        mode = st.radio("Overlay variable", ["Stoichiometry S","FRET efficiency E"], index=0, key="ov_mode_m")
+        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="ov_rule_m")
+        auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="ov_autofit_m")
 
-# Labels (indices as bins); you can relabel to physical S/E later
-fig.update_xaxes(title_text="E bins (columns)", row=2, col=1)
-fig.update_yaxes(title_text="S bins (rows)", row=2, col=1)
-fig.update_yaxes(title_text="S bins (rows)", row=2, col=2)
-fig.update_xaxes(title_text="Counts (E marginal)", row=1, col=1)
+        if mode == "Stoichiometry S":
+            x_cl, w_cl = dfX["S_Classical"].to_numpy(), dfX["Occur._S_Classical"].to_numpy()
+            x_pie, w_pie = dfX["S_PIE"].to_numpy(), dfX["Occur._S_PIE"].to_numpy()
+            xlabel = "Stoichiometry [S]"; legends = ("Classical (S)", "PIE (S)")
+        else:
+            x_cl, w_cl = dfX["E_Classical"].to_numpy(), dfX["Occur._E_Classical"].to_numpy()
+            x_pie, w_pie = dfX["E_PIE"].to_numpy(), dfX["Occur._E_PIE"].to_numpy()
+            xlabel = "PIE FRET [E]"; legends = ("Classical (E)", "PIE (E)")
 
-fig.update_layout(coloraxis=dict(colorscale="Viridis"),
-                  showlegend=False,
-                  bargap=0,
-                  margin=dict(l=40, r=10, t=40, b=40))
+        x_cl, w_cl = clean_pair(x_cl, w_cl)
+        x_pie, w_pie = clean_pair(x_pie, w_pie)
 
-st.plotly_chart(fig, use_container_width=True)
+        xmin = float(np.nanmin([np.nanmin(x_cl), np.nanmin(x_pie)]))
+        xmax = float(np.nanmax([np.nanmax(x_cl), np.nanmax(x_pie)]))
+        nb = auto_bins(np.concatenate([x_cl, x_pie]), rule=rule)
+        st.caption(f"Auto-bins ({rule}) → {nb} bins")
+        edges = np.linspace(xmin, xmax, nb+1)
+        centers = 0.5*(edges[:-1]+edges[1:])
+        hist_cl, _ = np.histogram(x_cl, bins=edges, weights=w_cl, density=True)
+        hist_pie, _ = np.histogram(x_pie, bins=edges, weights=w_pie, density=True)
+
+        fig = go.Figure()
+        fig.add_bar(x=centers, y=hist_cl, width=np.diff(edges), name=legends[0], opacity=0.5)
+        fig.add_bar(x=centers, y=hist_pie, width=np.diff(edges), name=legends[1], opacity=0.5)
+
+        if auto_fit:
+            fit_cl = smart_fit(centers, hist_cl, xmin, xmax)
+            fit_pie = smart_fit(centers, hist_pie, xmin, xmax)
+            xs = np.linspace(xmin, xmax, 1000)
+            if fit_cl:
+                p, perr, R2 = fit_cl
+                fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *p), mode="lines", name=f"{legends[0]} fit (R²={R2:.3f})"))
+            if fit_pie:
+                p, perr, R2 = fit_pie
+                fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *p), mode="lines", name=f"{legends[1]} fit (R²={R2:.3f})"))
+        fig.update_layout(xaxis_title=xlabel, yaxis_title="H [Occur.·10^3 Events] (density)")
+        st.plotly_chart(fig, use_container_width=True)
+
+# ---- Joint (Heatmap + Marginals) ----
+with tabs[3]:
+    st.subheader("Joint view: Heatmap + Marginals")
+    mats = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
+    if not mats:
+        st.info("No heatmap-like matrix found.")
+    else:
+        sel = st.selectbox("Choose matrix block", mats, key="joint_block_m",
+                           format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
+        M = blocks[sel][0].astype(float).replace([np.inf, -np.inf], np.nan).to_numpy()
+        smooth = st.slider("Gaussian smoothing (σ, 0=off)", 0.0, 6.0, 1.0, 0.1, key="joint_smooth_m")
+        if smooth>0:
+            Mplot = gaussian_filter1d(gaussian_filter1d(M, sigma=smooth, axis=0), sigma=smooth, axis=1)
+        else:
+            Mplot = M.copy()
+        e_marg = np.nansum(Mplot, axis=0)
+        s_marg = np.nansum(Mplot, axis=1)
+        nx, ny = Mplot.shape[1], Mplot.shape[0]
+        e_centers = np.arange(nx)
+        s_centers = np.arange(ny)
+        figj = make_subplots(
+            rows=2, cols=2,
+            specs=[[{"type":"xy"}, {"type":"xy"}],
+                   [{"type":"heatmap"}, {"type":"xy"}]],
+            column_widths=[0.8, 0.2], row_heights=[0.25, 0.75],
+            horizontal_spacing=0.02, vertical_spacing=0.02
+        )
+        figj.add_trace(go.Bar(x=e_centers, y=e_marg, name="E marginal", opacity=0.6), row=1, col=1)
+        figj.add_trace(go.Heatmap(z=Mplot, coloraxis="coloraxis", showscale=True), row=2, col=1)
+        figj.add_trace(go.Bar(y=s_centers, x=s_marg, orientation="h", name="S marginal", opacity=0.6), row=2, col=2)
+        figj.update_xaxes(matches="x", row=1, col=1)
+        figj.update_yaxes(matches="y", row=2, col=2)
+        figj.update_xaxes(title_text="E bins (columns)", row=2, col=1)
+        figj.update_yaxes(title_text="S bins (rows)", row=2, col=1)
+        figj.update_yaxes(title_text="S bins (rows)", row=2, col=2)
+        figj.update_xaxes(title_text="Counts (E marginal)", row=1, col=1)
+        figj.update_layout(coloraxis=dict(colorscale="Viridis"),
+                           showlegend=False, bargap=0,
+                           margin=dict(l=40, r=10, t=40, b=40))
+        st.plotly_chart(figj, use_container_width=True)
