@@ -7,7 +7,7 @@ from plotly.subplots import make_subplots
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 
-st.set_page_config(page_title="FRET Analyzer – FULL (styling options)", layout="wide")
+st.set_page_config(page_title="FRET Analyzer – FULL + PIE Analysis", layout="wide")
 st.title("FRET Analyzer – FULL")
 
 # ---------- parsing ----------
@@ -48,6 +48,7 @@ def r2_score(y, yhat):
     return 1 - ss_res/ss_tot if ss_tot>0 else np.nan
 
 def auto_bins(x, rule="Freedman–Diaconis", nb_fallback=80):
+    x = np.asarray(x, float)
     x = x[np.isfinite(x)]
     n = x.size
     if n < 2: return nb_fallback
@@ -56,7 +57,7 @@ def auto_bins(x, rule="Freedman–Diaconis", nb_fallback=80):
         if iqr == 0: return max(10, min(200, int(np.sqrt(n))))
         bw = 2 * iqr * (n ** (-1/3))
     elif rule == "Scott":
-        std = np.nanstd(x, ddof=1); 
+        std = np.nanstd(x, ddof=1)
         if std == 0: return max(10, min(200, int(np.sqrt(n))))
         bw = 3.5 * std * (n ** (-1/3))
     else:
@@ -97,8 +98,11 @@ def clean_pair(x, w):
     m = np.isfinite(x) & np.isfinite(w) & (w >= 0)
     return x[m], w[m]
 
+def fwhm_from_sigma(s):
+    return 2*np.sqrt(2*np.log(2))*s
+
 # ---------- UI ----------
-uploaded = st.file_uploader("Upload your .dat file", type=["dat","txt","csv"], key="uploader_full_style2")
+uploaded = st.file_uploader("Upload your .dat file", type=["dat","txt","csv"], key="uploader_full_merge")
 if uploaded is None:
     st.info("Upload your file to continue."); st.stop()
 
@@ -107,21 +111,21 @@ blocks = split_numeric_blocks_with_headers(raw)
 
 colorscales = ["Viridis","Plasma","Magma","Inferno","Cividis","Turbo","IceFire","YlGnBu","Greys"]
 
-tabs = st.tabs(["Heatmap", "Histogram (single)", "Overlay", "Joint (Heatmap + Marginals)"])
+tabs = st.tabs(["Heatmap", "Histogram (single)", "Overlay", "Joint (Heatmap + Marginals)", "PIE FRET Analysis"])
 
 # ---- Heatmap ----
 with tabs[0]:
     st.subheader("Correlogram Heatmap")
     mats = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
     if not mats: mats = list(range(len(blocks)))
-    iM = st.selectbox("Choose matrix block", mats, key="hm_block2",
+    iM = st.selectbox("Choose matrix block", mats, key="hm_block_merge",
                       format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
     dfm = blocks[iM][0].astype(float).replace([np.inf, -np.inf], np.nan)
     c1,c2,c3 = st.columns(3)
-    with c1: zmin = st.number_input("zmin (0=auto)", value=0.0, key="hm_zmin2")
-    with c2: zmax = st.number_input("zmax (0=auto)", value=0.0, key="hm_zmax2")
-    with c3: cmap = st.selectbox("Colorscale", colorscales, index=0, key="hm_cmap2")
-    smooth = st.slider("Gaussian smoothing (σ)", 0.0, 6.0, 1.0, 0.1, key="hm_smooth2")
+    with c1: zmin = st.number_input("zmin (0=auto)", value=0.0, key="hm_zmin_merge")
+    with c2: zmax = st.number_input("zmax (0=auto)", value=0.0, key="hm_zmax_merge")
+    with c3: cmap = st.selectbox("Colorscale", colorscales, index=0, key="hm_cmap_merge")
+    smooth = st.slider("Gaussian smoothing (σ)", 0.0, 6.0, 1.0, 0.1, key="hm_smooth_merge")
     arr = dfm.to_numpy()
     arrp = gaussian_filter1d(gaussian_filter1d(arr, sigma=smooth, axis=0), sigma=smooth, axis=1) if smooth>0 else arr
     fig = px.imshow(arrp, origin="lower", aspect="auto", color_continuous_scale=cmap,
@@ -133,10 +137,10 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Histogram + Gaussian fit (single dataset)")
     tbls = list(range(len(blocks)))
-    iT = st.selectbox("Choose block", tbls, index=tbls[-1] if tbls else 0, key="single_block2",
+    iT = st.selectbox("Choose block", tbls, index=tbls[-1] if tbls else 0, key="single_block_merge",
                       format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
     dft = blocks[iT][0].copy()
-    templ = st.radio("Column template", ["Generic (C0..)", "FRET 8-cols (named)"], index=1, key="single_template2")
+    templ = st.radio("Column template", ["Generic (C0..)", "FRET 8-cols (named)"], index=1, key="single_template_merge")
     if templ == "FRET 8-cols (named)" and dft.shape[1] >= 8:
         base = ["Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
                 "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE"]
@@ -145,10 +149,10 @@ with tabs[1]:
     else:
         dft.columns = [f"C{j}" for j in range(dft.shape[1])]
     c1,c2,c3,c4 = st.columns(4)
-    with c1: x_col = st.selectbox("Values column (x)", dft.columns, index=0, key="single_xcol2")
-    with c2: w_col = st.selectbox("Weights (optional)", ["(none)"]+list(dft.columns), index=0, key="single_wcol2")
-    with c3: rule  = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="single_rule2")
-    with c4: auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="single_autofit2")
+    with c1: x_col = st.selectbox("Values column (x)", dft.columns, index=0, key="single_xcol_merge")
+    with c2: w_col = st.selectbox("Weights (optional)", ["(none)"]+list(dft.columns), index=0, key="single_wcol_merge")
+    with c3: rule  = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="single_rule_merge")
+    with c4: auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="single_autofit_merge")
     x = pd.to_numeric(dft[x_col], errors="coerce").to_numpy()
     w = None
     if w_col != "(none)":
@@ -171,18 +175,18 @@ with tabs[2]:
     cand = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[1] >= 8]
     if not cand: st.info("No table with ≥8 columns found.")
     else:
-        iX = st.selectbox("Choose the 8+ column block", cand, key="ov_block2",
+        iX = st.selectbox("Choose the 8+ column block", cand, key="ov_block_merge",
                           format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
         dfX = blocks[iX][0].copy()
         base = ["Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
                 "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE"]
         extra = [f"Extra_{i}" for i in range(max(0, dfX.shape[1]-8))]
         dfX.columns = base + extra
-        mode = st.radio("Overlay variable", ["Stoichiometry S","FRET efficiency E"], index=0, key="ov_mode2")
-        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="ov_rule2")
-        auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="ov_autofit2")
-        style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], index=0, key="ov_style2")
-        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="ov_smooth2")
+        mode = st.radio("Overlay variable", ["Stoichiometry S","FRET efficiency E"], index=0, key="ov_mode_merge")
+        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="ov_rule_merge")
+        auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="ov_autofit_merge")
+        style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], index=0, key="ov_style_merge")
+        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="ov_smooth_merge")
         if mode == "Stoichiometry S":
             x_cl, w_cl = dfX["S_Classical"].to_numpy(), dfX["Occur._S_Classical"].to_numpy()
             x_pie, w_pie = dfX["S_PIE"].to_numpy(), dfX["Occur._S_PIE"].to_numpy()
@@ -216,7 +220,7 @@ with tabs[2]:
 # ---- Joint (Heatmap + S/E histograms) ----
 with tabs[3]:
     st.subheader("Joint view: S–E heatmap + S/E histograms (from 8‑col table)")
-    colorscale = st.selectbox("Heatmap colorscale", colorscales, index=0, key="joint_cmap2")
+    colorscale = st.selectbox("Heatmap colorscale", colorscales, index=0, key="joint_cmap_merge")
     mats = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
     t8   = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[1] >= 8]
     if not mats or not t8:
@@ -224,23 +228,21 @@ with tabs[3]:
     else:
         col1, col2 = st.columns(2)
         with col1:
-            iM = st.selectbox("Matrix block (S×E heatmap)", mats, key="joint_hm_block2",
+            iM = st.selectbox("Matrix block (S×E heatmap)", mats, key="joint_hm_block_merge",
                               format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
-            smooth = st.slider("Heatmap smoothing σ", 0.0, 6.0, 1.0, 0.1, key="joint_hm_smooth2")
+            smooth = st.slider("Heatmap smoothing σ", 0.0, 6.0, 1.0, 0.1, key="joint_hm_smooth_merge")
         with col2:
-            iT = st.selectbox("8‑col table block (S/E)", t8, key="joint_t8_block2",
+            iT = st.selectbox("8‑col table block (S/E)", t8, key="joint_t8_block_merge",
                               format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
-            which = st.selectbox("Histogram source", ["PIE", "Classical", "Both"], key="joint_hist_source2")
-            match_bins = st.checkbox("Match histogram bins to heatmap grid", value=True, key="joint_match_bins2")
-            style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], key="joint_style2")
-            smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="joint_smooth_lines2")
-        # heatmap
+            which = st.selectbox("Histogram source", ["PIE", "Classical", "Both"], key="joint_hist_source_merge")
+            match_bins = st.checkbox("Match histogram bins to heatmap grid", value=True, key="joint_match_bins_merge")
+            style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], key="joint_style_merge")
+            smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="joint_smooth_lines_merge")
         M = blocks[iM][0].astype(float).replace([np.inf, -np.inf], np.nan).to_numpy()
         Mplot = gaussian_filter1d(gaussian_filter1d(M, sigma=smooth, axis=0), sigma=smooth, axis=1) if smooth>0 else M.copy()
         ny, nx = Mplot.shape
         e_edges = np.linspace(0, 1, nx+1); e_centers = 0.5*(e_edges[:-1]+e_edges[1:])
         s_edges = np.linspace(0, 1, ny+1); s_centers = 0.5*(s_edges[:-1]+s_edges[1:])
-        # table
         tbl = blocks[iT][0].copy()
         base = ["Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
                 "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE"]
@@ -261,7 +263,6 @@ with tabs[3]:
             nb_s = auto_bins(np.concatenate([S_cl, S_pie])); s_edges = np.linspace(0,1,nb_s+1); s_y = 0.5*(s_edges[:-1]+s_edges[1:])
             e_hist_cl = hist1(E_cl, W_E_cl, e_edges); e_hist_pie = hist1(E_pie, W_E_pie, e_edges)
             s_hist_cl = hist1(S_cl, W_S_cl, s_edges); s_hist_pie = hist1(S_pie, W_S_pie, s_edges)
-        # build figure
         figj = make_subplots(
             rows=2, cols=2,
             specs=[[{"type":"xy"}, {"type":"xy"}],
@@ -269,7 +270,6 @@ with tabs[3]:
             column_widths=[0.8, 0.2], row_heights=[0.25, 0.75],
             horizontal_spacing=0.02, vertical_spacing=0.02
         )
-        # top E hist(s)
         def add_hist_top(xc, yc, name):
             if style == "Bars":
                 figj.add_trace(go.Bar(x=xc, y=yc, name=name, opacity=0.6), row=1, col=1)
@@ -278,9 +278,7 @@ with tabs[3]:
                 figj.add_trace(go.Scatter(x=xc, y=ysm, mode="lines", name=name), row=1, col=1)
         if which in ("Classical","Both"): add_hist_top(e_x, e_hist_cl, "Classical E")
         if which in ("PIE","Both"):       add_hist_top(e_x, e_hist_pie, "PIE E")
-        # heatmap
         figj.add_trace(go.Heatmap(z=Mplot, coloraxis="coloraxis", showscale=True), row=2, col=1)
-        # right S hist(s)
         def add_hist_right(yc, xc, name):
             if style == "Bars":
                 figj.add_trace(go.Bar(y=yc, x=xc, orientation="h", name=name, opacity=0.6), row=2, col=2)
@@ -293,5 +291,61 @@ with tabs[3]:
             figj.update_xaxes(matches="x", row=1, col=1); figj.update_yaxes(matches="y", row=2, col=2)
         figj.update_xaxes(title_text="E (0–1)", row=2, col=1); figj.update_yaxes(title_text="S (0–1)", row=2, col=1)
         figj.update_yaxes(title_text="S (0–1)", row=2, col=2); figj.update_xaxes(title_text="Counts (E)", row=1, col=1)
-        figj.update_layout(coloraxis=dict(colorscale=colorscale), showlegend=True, bargap=0, margin=dict(l=40,r=10,t=40,b=40))
+        figj.update_layout(coloraxis=dict(colorscale=colorscales[0]), showlegend=True, bargap=0, margin=dict(l=40,r=10,t=40,b=40), coloraxis_colorscale=colorscale)
         st.plotly_chart(figj, use_container_width=True)
+
+# ---- PIE FRET Analysis ----
+with tabs[4]:
+    st.subheader("PIE FRET – Histogram + Gaussian Fit (Dedicated)")
+    candidates = [i for i,(df,_,_,_) in enumerate(blocks) if blocks[i][0].shape[1] >= 8]
+    if not candidates:
+        st.info("No 8+ column table found in this file.")
+    else:
+        iP = st.selectbox("Pick the 8-column block", candidates, key="pie_block_merge",
+                          format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
+        df = blocks[iP][0].copy()
+        base = ["Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE","E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"]
+        extra = [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
+        df.columns = base + extra
+
+        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="pie_rule_merge")
+        style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], index=0, key="pie_style_merge")
+        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="pie_smooth_merge")
+        do_fit = st.checkbox("Fit Gaussian", value=True, key="pie_fit_merge")
+
+        E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
+        W = pd.to_numeric(df["Occur_E_PIE"], errors="coerce").to_numpy()
+        m = np.isfinite(E) & np.isfinite(W) & (W>=0)
+        E, W = E[m], W[m]
+        nb = auto_bins(E, rule=rule); xmin, xmax = float(np.nanmin(E)), float(np.nanmax(E))
+        edges = np.linspace(xmin, xmax, nb+1); centers = 0.5*(edges[:-1]+edges[1:])
+        hist, _ = np.histogram(E, bins=edges, weights=W, density=True)
+
+        fig = go.Figure()
+        if style == "Bars":
+            fig.add_bar(x=centers, y=hist, width=np.diff(edges), name="PIE FRET (E) histogram", opacity=0.55)
+        else:
+            y = gaussian_filter1d(hist, sigma=smooth_bins) if smooth_bins>0 else hist
+            fig.add_trace(go.Scatter(x=centers, y=y, mode="lines", name="PIE FRET (E)"))
+
+        if do_fit:
+            fit = smart_fit(centers, hist, xmin, xmax)
+            if fit:
+                p, perr, R2 = fit
+                xs = np.linspace(xmin, xmax, 1000)
+                fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *p), mode="lines", name=f"Gaussian fit (R²={R2:.3f})"))
+                y0, mu, sigma, A = p
+                dy0, dmu, dsigma, dA = perr
+                fwhm = fwhm_from_sigma(sigma)
+                dfres = pd.DataFrame({
+                    "parameter": ["baseline y0","mean μ","sigma σ","FWHM","area A","R²"],
+                    "value":     [y0, mu, sigma, fwhm, A, R2],
+                    "uncertainty":[dy0, dmu, dsigma, fwhm*(dsigma/sigma) if sigma>0 else np.nan, dA, np.nan]
+                })
+                st.subheader("Fit results (PIE FRET E)")
+                st.dataframe(dfres, use_container_width=True)
+                st.download_button("Download results (CSV)", dfres.to_csv(index=False).encode(), "pie_fret_fit_results.csv", "text/csv")
+            else:
+                st.warning("Fit could not converge – try a different binning rule or check data quality.")
+        fig.update_layout(xaxis_title="PIE FRET efficiency, E", yaxis_title="Density")
+        st.plotly_chart(fig, use_container_width=True)
