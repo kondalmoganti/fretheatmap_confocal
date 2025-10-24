@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 
-st.set_page_config(page_title="FRET Analyzer (Heatmap + Origin-like Histogram)", layout="wide")
+st.set_page_config(page_title="FRET Analyzer (robust fits)", layout="wide")
 st.title("FRET Analyzer")
 
 def split_numeric_blocks(text: str):
@@ -101,38 +101,67 @@ else:
         xmin = st.number_input("xmin", value=float(np.nanmin(values)), format="%.6f")
         xmax = st.number_input("xmax", value=float(np.nanmax(values)), format="%.6f")
 
-        hist, edges = np.histogram(values[np.isfinite(values)], bins=nb, range=(xmin, xmax), weights=weights, density=True)
+        valid = np.isfinite(values)
+        if valid.sum() < 5:
+            st.warning("Not enough finite values for a histogram/fit."); st.stop()
+
+        hist, edges = np.histogram(values[valid], bins=nb, range=(xmin, xmax), weights=weights if weights is not None else None, density=True)
         centers = 0.5*(edges[:-1] + edges[1:])
 
-        # Fit
-        y0_0 = max(1e-9, float(np.min(hist))); mu_0 = float(np.average(centers, weights=hist+1e-12))
-        sigma_0 = float(np.sqrt(np.average((centers-mu_0)**2, weights=hist+1e-12)))
-        A_0 = float(np.trapz(hist, centers))
-        popt, pcov = curve_fit(gaussian, centers, hist, p0=[y0_0, mu_0, max(sigma_0,1e-6), A_0], maxfev=20000)
-        perr = np.sqrt(np.diag(pcov)); yhat = gaussian(centers, *popt); R2 = r2_score(hist, yhat)
-        xfit = np.linspace(edges[0], edges[-1], 800); yfit = gaussian(xfit, *popt)
-
-        xlabel = st.text_input("x label", "PIE FRET [E]")
-        ylabel = st.text_input("y label", "H [Occur.·10^{3} Events]")
-        show_box = st.checkbox("Show stats box on plot", value=True)
-
+        # Plot histogram first
         figH = go.Figure()
         figH.add_trace(go.Bar(x=centers, y=hist, width=np.diff(edges), name="Histogram", opacity=0.55))
-        figH.add_trace(go.Scatter(x=xfit, y=yfit, mode="lines", name="Gaussian fit"))
-        figH.update_layout(xaxis_title=xlabel, yaxis_title=ylabel)
 
-        if show_box:
-            text = (
-                "<b>Modell</b>  Gauss<br>"
-                "Gleichung  y = y₀ + A/(σ√(2π))·exp(-(x-xc)²/(2σ²))<br>"
-                f"y₀  {popt[0]:.5g} ± {perr[0]:.2g}<br>"
-                f"xc  {popt[1]:.5g} ± {perr[1]:.2g}<br>"
-                f"w   {popt[2]:.5g} ± {perr[2]:.2g}<br>"
-                f"A   {popt[3]:.5g} ± {perr[3]:.2g}<br>"
-                f"R²  {R2:.5f}"
-            )
-            figH.add_annotation(xref="paper", yref="paper", x=0.58, y=0.85, align="left",
-                                showarrow=False, bordercolor="black", borderwidth=1,
-                                bgcolor="rgba(255,255,255,0.85)", text=text)
+        # Fit only if there is sufficient non-zero signal
+        nonzero = np.isfinite(hist) & (hist > 0)
+        if nonzero.sum() < 5:
+            st.info("Too few non-zero bins for a stable Gaussian fit. Try more bins, a wider range, or remove weights.")
+            figH.update_layout(xaxis_title="Value", yaxis_title="Density")
+            st.plotly_chart(figH, use_container_width=True)
+        else:
+            # Initial guesses
+            mu0 = float(np.average(centers[nonzero], weights=hist[nonzero]))
+            var0 = float(np.average((centers[nonzero]-mu0)**2, weights=hist[nonzero]))
+            sigma0 = max(1e-6, np.sqrt(var0))
+            y00 = max(1e-9, float(np.min(hist[nonzero]) * 0.5))
+            A0 = float(np.trapz(hist[nonzero], centers[nonzero]))
+            # Parameter bounds
+            lower = [0.0, xmin, 1e-6, 0.0]
+            upper = [float(np.max(hist)*2), xmax, (xmax-xmin)*2, np.inf]
 
-        st.plotly_chart(figH, use_container_width=True)
+            success = False
+            popt = perr = None
+            for mul in (1.0, 0.5, 2.0):
+                p0 = [y00, mu0, sigma0*mul, max(A0, 1e-6)]
+                try:
+                    popt, pcov = curve_fit(gaussian, centers[nonzero], hist[nonzero], p0=p0,
+                                           bounds=(lower, upper), maxfev=50000)
+                    perr = np.sqrt(np.diag(pcov))
+                    success = True
+                    break
+                except Exception as e:
+                    continue
+
+            if not success:
+                st.warning("Gaussian fit did not converge. Adjust bins/range or uncheck weights.")
+                figH.update_layout(xaxis_title="Value", yaxis_title="Density")
+                st.plotly_chart(figH, use_container_width=True)
+            else:
+                xfit = np.linspace(edges[0], edges[-1], 800); yfit = gaussian(xfit, *popt)
+                R2 = r2_score(hist[nonzero], gaussian(centers[nonzero], *popt))
+                figH.add_trace(go.Scatter(x=xfit, y=yfit, mode="lines", name="Gaussian fit"))
+                figH.update_layout(xaxis_title="Value", yaxis_title="Density")
+                # Stats box
+                text = (
+                    "<b>Model</b>  Gauss<br>"
+                    "y = y₀ + A/(σ√(2π))·exp(-(x-xc)²/(2σ²))<br>"
+                    f"y₀  {popt[0]:.5g} ± {perr[0]:.2g}<br>"
+                    f"xc  {popt[1]:.5g} ± {perr[1]:.2g}<br>"
+                    f"w   {popt[2]:.5g} ± {perr[2]:.2g}<br>"
+                    f"A   {popt[3]:.5g} ± {perr[3]:.2g}<br>"
+                    f"R²  {R2:.5f}"
+                )
+                figH.add_annotation(xref="paper", yref="paper", x=0.58, y=0.85, align="left",
+                                    showarrow=False, bordercolor="black", borderwidth=1,
+                                    bgcolor="rgba(255,255,255,0.85)", text=text)
+                st.plotly_chart(figH, use_container_width=True)
