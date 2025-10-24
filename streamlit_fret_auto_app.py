@@ -6,10 +6,9 @@ import plotly.graph_objects as go
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 
-st.set_page_config(page_title="FRET Analyzer – FULL", layout="wide")
+st.set_page_config(page_title="FRET Analyzer – FULL (no duplicate ids)", layout="wide")
 st.title("FRET Analyzer (FULL build)")
 
-# ---------------- Parsing (with header capture) ----------------
 def split_numeric_blocks_with_headers(text: str):
     text = text.replace(",", ".")
     lines = text.splitlines()
@@ -47,7 +46,6 @@ def split_numeric_blocks_with_headers(text: str):
         flush(len(lines)-1)
     return blocks
 
-# ---------------- Models & helpers ----------------
 def gaussian(x, y0, mu, sigma, A):
     amp = A / (sigma * np.sqrt(2*np.pi))
     return y0 + amp * np.exp(-0.5 * ((x - mu)/sigma)**2)
@@ -82,18 +80,14 @@ def smart_fit(centers, hist, xmin, xmax):
     x, z = x[m], z[m]
     if x.size < 8 or np.count_nonzero(z) < 5:
         return None
-    # smooth for peak detection
     zs = gaussian_filter1d(z, sigma=max(1, int(len(z)*0.02)))
     argmax = int(np.argmax(zs))
     mu0 = float(x[argmax])
-    # choose fit window
     alpha = 0.08
-    mask = zs >= alpha * zs.max()
     from scipy.ndimage import binary_dilation
-    mask = binary_dilation(mask, iterations=2)
+    mask = binary_dilation(zs >= alpha*zs.max(), iterations=2)
     xw, zw = x[mask], z[mask]
-    if xw.size < 8:
-        xw, zw = x, z
+    if xw.size < 8: xw, zw = x, z
     q25, q75 = np.quantile(xw, [0.25, 0.75])
     sigma0 = max(1e-3, (q75 - q25) / 1.349)
     y00 = max(1e-6, float(np.median(z[(z <= np.percentile(z, 20))])))
@@ -117,8 +111,7 @@ def clean_pair(x, w):
     m = np.isfinite(x) & np.isfinite(w) & (w >= 0)
     return x[m], w[m]
 
-# ---------------- UI ----------------
-uploaded = st.file_uploader("Upload your .dat file", type=["dat","txt","csv"])
+uploaded = st.file_uploader("Upload your .dat file", type=["dat","txt","csv"], key="uploader")
 
 if uploaded is None:
     st.info("Upload your file to continue.")
@@ -129,15 +122,17 @@ blocks = split_numeric_blocks_with_headers(raw)
 
 tabs = st.tabs(["Heatmap", "Histogram (single)", "Overlay: Classical vs PIE"])
 
-# -------- Heatmap --------
+# Heatmap tab
 with tabs[0]:
     st.subheader("Correlogram Heatmap")
     mats = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
     if not mats: mats = list(range(len(blocks)))
-    sel = st.selectbox("Choose block", mats, format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
+    sel = st.selectbox("Choose block", mats, key="hm_block",
+                       format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
     dfm = blocks[sel][0].astype(float).replace([np.inf, -np.inf], np.nan)
-    zmin = st.number_input("zmin (0=auto)", value=0.0); zmax = st.number_input("zmax (0=auto)", value=0.0)
-    smooth = st.slider("Gaussian smoothing (σ)", 0.0, 6.0, 1.0, 0.1)
+    zmin = st.number_input("zmin (0=auto)", value=0.0, key="hm_zmin")
+    zmax = st.number_input("zmax (0=auto)", value=0.0, key="hm_zmax")
+    smooth = st.slider("Gaussian smoothing (σ)", 0.0, 6.0, 1.0, 0.1, key="hm_smooth")
     arr = dfm.to_numpy()
     if smooth>0:
         arrp = gaussian_filter1d(gaussian_filter1d(arr, sigma=smooth, axis=0), sigma=smooth, axis=1)
@@ -148,14 +143,15 @@ with tabs[0]:
                     labels=dict(x="E bins (columns)", y="S bins (rows)", color="Counts"))
     st.plotly_chart(fig, use_container_width=True)
 
-# -------- Histogram (single) --------
+# Single histogram tab
 with tabs[1]:
     st.subheader("Histogram + Gaussian fit (single dataset)")
     tbls = list(range(len(blocks)))
     sel = st.selectbox("Choose block", tbls, index=tbls[-1] if tbls else 0,
+                       key="single_block",
                        format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
     dft = blocks[sel][0].copy()
-    templ = st.radio("Column template", ["Generic (C0..)", "FRET 8-cols (named)"], index=1)
+    templ = st.radio("Column template", ["Generic (C0..)", "FRET 8-cols (named)"], index=1, key="single_template")
     if templ == "FRET 8-cols (named)" and dft.shape[1] >= 8:
         base_names = ["Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
                       "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE"]
@@ -166,10 +162,10 @@ with tabs[1]:
     st.dataframe(dft.head(12), use_container_width=True)
 
     c1,c2,c3,c4 = st.columns(4)
-    with c1: x_col = st.selectbox("Values column (x)", dft.columns, index=0)
-    with c2: w_col = st.selectbox("Weights (optional)", ["(none)"]+list(dft.columns), index=0)
-    with c3: rule  = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0)
-    with c4: auto_fit = st.checkbox("Auto-fit Gaussian", value=True)
+    with c1: x_col = st.selectbox("Values column (x)", dft.columns, index=0, key="single_xcol")
+    with c2: w_col = st.selectbox("Weights (optional)", ["(none)"]+list(dft.columns), index=0, key="single_wcol")
+    with c3: rule  = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="single_rule")
+    with c4: auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="single_autofit")
 
     x = pd.to_numeric(dft[x_col], errors="coerce").to_numpy()
     w = None
@@ -193,28 +189,17 @@ with tabs[1]:
             p, perr, R2 = fit
             xs = np.linspace(xmin, xmax, 800)
             figH.add_trace(go.Scatter(x=xs, y=gaussian(xs, *p), mode="lines", name=f"Gaussian fit (R²={R2:.3f})"))
-            text = (
-                "<b>Model</b> Gauss<br>"
-                f"y₀ {p[0]:.5g} ± {perr[0]:.2g}<br>"
-                f"xc {p[1]:.5g} ± {perr[1]:.2g}<br>"
-                f"w  {p[2]:.5g} ± {perr[2]:.2g}<br>"
-                f"A  {p[3]:.5g} ± {perr[3]:.2g}<br>"
-                f"R² {R2:.5f}"
-            )
-            figH.add_annotation(xref="paper", yref="paper", x=0.62, y=0.85, align="left",
-                                showarrow=False, bordercolor="black", borderwidth=1,
-                                bgcolor="rgba(255,255,255,0.85)", text=text)
     figH.update_layout(xaxis_title="Value", yaxis_title="Density")
     st.plotly_chart(figH, use_container_width=True)
 
-# -------- Overlay: Classical vs PIE --------
+# Overlay tab
 with tabs[2]:
     st.subheader("Overlay: Classical vs PIE (E and S)")
     cand = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[1] >= 8]
     if not cand:
         st.info("No table with ≥ 8 columns found.")
     else:
-        sel = st.selectbox("Choose the 8+ column block", cand,
+        sel = st.selectbox("Choose the 8+ column block", cand, key="ov_block",
                            format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
         dfX = blocks[sel][0].copy()
         base_names = ["Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
@@ -222,9 +207,9 @@ with tabs[2]:
         extra = [f"Extra_{i}" for i in range(max(0, dfX.shape[1]-8))]
         dfX.columns = base_names + extra
 
-        mode = st.radio("Overlay variable", ["Stoichiometry S","FRET efficiency E"], index=0)
-        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0)
-        auto_fit = st.checkbox("Auto-fit Gaussian", value=True)
+        mode = st.radio("Overlay variable", ["Stoichiometry S","FRET efficiency E"], index=0, key="ov_mode")
+        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="ov_rule")
+        auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="ov_autofit")
 
         if mode == "Stoichiometry S":
             x_cl, w_cl = dfX["S_Classical"].to_numpy(), dfX["Occur._S_Classical"].to_numpy()
@@ -234,11 +219,6 @@ with tabs[2]:
             x_cl, w_cl = dfX["E_Classical"].to_numpy(), dfX["Occur._E_Classical"].to_numpy()
             x_pie, w_pie = dfX["E_PIE"].to_numpy(), dfX["Occur._E_PIE"].to_numpy()
             xlabel = "PIE FRET [E]"; legends = ("Classical (E)", "PIE (E)")
-
-        def clean_pair(x, w):
-            x = np.asarray(x, float); w = np.asarray(w, float)
-            m = np.isfinite(x) & np.isfinite(w) & (w >= 0)
-            return x[m], w[m]
 
         x_cl, w_cl = clean_pair(x_cl, w_cl)
         x_pie, w_pie = clean_pair(x_pie, w_pie)
@@ -266,6 +246,5 @@ with tabs[2]:
             if fit_pie:
                 p, perr, R2 = fit_pie
                 fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *p), mode="lines", name=f"{legends[1]} fit (R²={R2:.3f})"))
-
         fig.update_layout(xaxis_title=xlabel, yaxis_title="H [Occur.·10^3 Events] (density)")
         st.plotly_chart(fig, use_container_width=True)
