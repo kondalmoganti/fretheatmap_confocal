@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 
-st.set_page_config(page_title="FRET Analyzer (heatmap + histograms + overlay)", layout="wide")
+st.set_page_config(page_title="FRET Analyzer (explicit column mapping)", layout="wide")
 st.title("FRET Analyzer")
 
 def split_numeric_blocks(text: str):
@@ -81,163 +81,84 @@ else:
     raw = uploaded.getvalue().decode("utf-8", errors="ignore")
     blocks = split_numeric_blocks(raw)
 
-    tabs = st.tabs(["Heatmap", "Histogram (single)", "Overlay: Classical vs PIE"])
+    tabs = st.tabs(["Overlay: Classical vs PIE (explicit mapping)"])
 
-    # ---------------- HEATMAP ----------------
     with tabs[0]:
-        st.subheader("Correlogram Heatmap")
-        mats = [i for i,(k,df,_,_) in enumerate(blocks) if k=="matrix"]
-        if not mats: mats = list(range(len(blocks)))
-        sel = st.selectbox("Choose block", mats, format_func=lambda i: f"Block {i} (shape {blocks[i][1].shape})")
-        dfm = blocks[sel][1].astype(float).replace([np.inf,-np.inf], np.nan)
-        zmin = st.number_input("zmin (0=auto)", value=0.0); zmax = st.number_input("zmax (0=auto)", value=0.0)
-        smooth = st.slider("Gaussian smoothing (σ)", 0.0, 6.0, 1.0, 0.1)
-        arr = dfm.to_numpy()
-        if smooth>0:
-            arrp = gaussian_filter1d(gaussian_filter1d(arr, sigma=smooth, axis=0), sigma=smooth, axis=1)
-        else:
-            arrp = arr
-        fig = px.imshow(arrp, origin="lower", aspect="auto", color_continuous_scale="Viridis",
-                        zmin=None if zmin<=0 else zmin, zmax=None if zmax<=0 else zmax,
-                        labels=dict(x="E bins (columns)", y="S bins (rows)", color="Counts"))
-        st.plotly_chart(fig, use_container_width=True)
-
-    # ---------------- SINGLE HISTOGRAM ----------------
-    with tabs[1]:
-        st.subheader("Histogram + Gaussian fit (single dataset)")
-        tbls = [i for i,(k,df,_,_) in enumerate(blocks) if k in ("table","vector","matrix")]
-        sel = st.selectbox("Choose block", tbls, index=tbls[-1] if tbls else 0,
-                           format_func=lambda i: f"Block {i} (shape {blocks[i][1].shape})")
-        dft = blocks[sel][1].copy(); dft.columns = [f"C{j}" for j in range(dft.shape[1])]
-        st.dataframe(dft.head(12), use_container_width=True)
-
-        c1,c2,c3 = st.columns(3)
-        with c1: x_col = st.selectbox("Values column (x)", dft.columns, index=0)
-        with c2: w_col = st.selectbox("Weights (optional)", ["(none)"]+list(dft.columns), index=0)
-        with c3: nb = st.slider("Bins", 10, 200, 50, 1)
-
-        values = pd.to_numeric(dft[x_col], errors="coerce").to_numpy()
-        weights = None
-        if w_col != "(none)":
-            weights = pd.to_numeric(dft[w_col], errors="coerce").to_numpy()
-            weights = np.where(np.isfinite(weights) & (weights>0), weights, 0.0)
-
-        xmin = st.number_input("xmin", value=float(np.nanmin(values)), format="%.6f")
-        xmax = st.number_input("xmax", value=float(np.nanmax(values)), format="%.6f")
-
-        valid = np.isfinite(values)
-        hist, edges = np.histogram(values[valid], bins=nb, range=(xmin, xmax), weights=weights if weights is not None else None, density=True)
-        centers = 0.5*(edges[:-1] + edges[1:])
-
-        figH = go.Figure()
-        figH.add_trace(go.Bar(x=centers, y=hist, width=np.diff(edges), name="Histogram", opacity=0.55))
-
-        fit = try_gauss_fit(centers, hist, xmin, xmax)
-        if fit is not None:
-            popt, perr = fit
-            xfit = np.linspace(edges[0], edges[-1], 800); yfit = gaussian(xfit, *popt)
-            R2 = r2_score(hist, gaussian(centers, *popt))
-            figH.add_trace(go.Scatter(x=xfit, y=yfit, mode="lines", name="Gaussian fit"))
-            text = (
-                "<b>Model</b> Gauss<br>"
-                f"y₀ {popt[0]:.5g} ± {perr[0]:.2g}<br>"
-                f"xc {popt[1]:.5g} ± {perr[1]:.2g}<br>"
-                f"w  {popt[2]:.5g} ± {perr[2]:.2g}<br>"
-                f"A  {popt[3]:.5g} ± {perr[3]:.2g}<br>"
-                f"R² {R2:.5f}"
-            )
-            figH.add_annotation(xref="paper", yref="paper", x=0.58, y=0.85, align="left",
-                                showarrow=False, bordercolor="black", borderwidth=1,
-                                bgcolor="rgba(255,255,255,0.85)", text=text)
-        st.plotly_chart(figH, use_container_width=True)
-
-    # ---------------- OVERLAY: CLASSICAL vs PIE ----------------
-    with tabs[2]:
-        st.subheader("Overlay: Classical vs PIE FRET (E and S)")
-        # Find candidate blocks with >= 8 columns
+        st.subheader("Overlay: map your columns exactly as headers")
         cand = [i for i,(_,df,_,_) in enumerate(blocks) if df.shape[1] >= 8]
         if not cand:
-            st.info("No table with >= 8 columns found. Pick the block in the previous tab instead.")
+            st.info("No table with ≥ 8 numeric columns found.")
         else:
-            sel = st.selectbox("Choose a block that contains Classical+PIE columns", cand,
+            sel = st.selectbox("Choose the 8+ column block", cand,
                                format_func=lambda i: f"Block {i} (shape {blocks[i][1].shape})")
-            df8 = blocks[sel][1].copy()
-            # by position mapping based on your header example:
-            # [0]=Classical Occur (S), [1]=Classical S
-            # [2]=PIE Occur (S), [3]=PIE S
-            # [4]=Classical E, [5]=Classical Occur (E)
-            # [6]=PIE E, [7]=PIE Occur (E)
-            # sanitize
-            df8 = df8.replace(",", ".", regex=True)
-            dfn = pd.DataFrame()
-            for c in range(8):
-                dfn[c] = pd.to_numeric(df8.iloc[:, c], errors="coerce")
-            # --- Overlay for E ---
-            st.markdown("### FRET Efficiency (E) — Classical vs PIE")
-            nb_e = st.slider("Bins (E)", 20, 200, 80, 1, key="bins_e")
-            xmin_e = st.number_input("E min", value=float(np.nanmin([dfn[4].min(), dfn[6].min()])), format="%.6f", key="emin")
-            xmax_e = st.number_input("E max", value=float(np.nanmax([dfn[4].max(), dfn[6].max()])), format="%.6f", key="emax")
+            dfX = blocks[sel][1].copy()
+            dfX = dfX.replace(",", ".", regex=True)
+            # create named columns
+            dfX.columns = [f"C{j}" for j in range(dfX.shape[1])]
+            st.dataframe(dfX.head(10), use_container_width=True)
 
-            # common edges for both so shapes are comparable
+            # Column selectors (defaults match your header order)
+            cols = dfX.columns.tolist()
+            st.markdown("**Map columns**")
+            c1,c2 = st.columns(2)
+            with c1:
+                idx_cl_s_val = st.selectbox("Classical S values (S[])", cols, index=1)
+                idx_cl_s_w   = st.selectbox("Classical S weights (Occur.)", cols, index=0)
+                idx_cl_e_val = st.selectbox("Classical E values (E[])", cols, index=4)
+                idx_cl_e_w   = st.selectbox("Classical E weights (Occur.)", cols, index=5)
+            with c2:
+                idx_pie_s_val = st.selectbox("PIE S values (S[])", cols, index=3)
+                idx_pie_s_w   = st.selectbox("PIE S weights (Occur.)", cols, index=2)
+                idx_pie_e_val = st.selectbox("PIE E values (E[])", cols, index=6)
+                idx_pie_e_w   = st.selectbox("PIE E weights (Occur.)", cols, index=7)
+
+            # Convert to numeric arrays
+            def get_num(col):
+                return pd.to_numeric(dfX[col], errors="coerce").to_numpy()
+
+            S_cl, W_S_cl = get_num(idx_cl_s_val), get_num(idx_cl_s_w)
+            S_pie, W_S_pie = get_num(idx_pie_s_val), get_num(idx_pie_s_w)
+            E_cl, W_E_cl = get_num(idx_cl_e_val), get_num(idx_cl_e_w)
+            E_pie, W_E_pie = get_num(idx_pie_e_val), get_num(idx_pie_e_w)
+
+            # E overlay
+            st.markdown("### FRET Efficiency E — Classical vs PIE")
+            nb_e = st.slider("Bins (E)", 20, 200, 80, 1)
+            xmin_e = st.number_input("E min", value=float(np.nanmin([np.nanmin(E_cl), np.nanmin(E_pie)])), format="%.6f")
+            xmax_e = st.number_input("E max", value=float(np.nanmax([np.nanmax(E_cl), np.nanmax(E_pie)])), format="%.6f")
             edges_e = np.linspace(xmin_e, xmax_e, nb_e+1)
-            hist_cl_e, _ = np.histogram(dfn[4].values, bins=edges_e, weights=dfn[5].values, density=True)
-            hist_pie_e, _ = np.histogram(dfn[6].values, bins=edges_e, weights=dfn[7].values, density=True)
+            hist_cl_e, _ = np.histogram(E_cl, bins=edges_e, weights=W_E_cl, density=True)
+            hist_pie_e, _ = np.histogram(E_pie, bins=edges_e, weights=W_E_pie, density=True)
             centers_e = 0.5*(edges_e[:-1]+edges_e[1:])
-
             figE = go.Figure()
             figE.add_trace(go.Bar(x=centers_e, y=hist_cl_e, width=np.diff(edges_e), name="Classical (E)", opacity=0.45))
             figE.add_trace(go.Bar(x=centers_e, y=hist_pie_e, width=np.diff(edges_e), name="PIE (E)", opacity=0.45))
-
-            # fits
             fit_cl_e = try_gauss_fit(centers_e, hist_cl_e, xmin_e, xmax_e)
             fit_pie_e = try_gauss_fit(centers_e, hist_pie_e, xmin_e, xmax_e)
             if fit_cl_e:
-                p, s = fit_cl_e
-                xfit = np.linspace(xmin_e, xmax_e, 800); yfit = gaussian(xfit, *p)
-                figE.add_trace(go.Scatter(x=xfit, y=yfit, mode="lines", name="Classical fit (E)"))
+                p,_=fit_cl_e; xfit=np.linspace(xmin_e,xmax_e,800); figE.add_trace(go.Scatter(x=xfit,y=gaussian(xfit,*p),name="Classical fit (E)"))
             if fit_pie_e:
-                p, s = fit_pie_e
-                xfit = np.linspace(xmin_e, xmax_e, 800); yfit = gaussian(xfit, *p)
-                figE.add_trace(go.Scatter(x=xfit, y=yfit, mode="lines", name="PIE fit (E)"))
+                p,_=fit_pie_e; xfit=np.linspace(xmin_e,xmax_e,800); figE.add_trace(go.Scatter(x=xfit,y=gaussian(xfit,*p),name="PIE fit (E)"))
             figE.update_layout(xaxis_title="E", yaxis_title="Density")
             st.plotly_chart(figE, use_container_width=True)
 
-            # stats table
-            def tbl_row(tag, fit):
-                if not fit: return [tag, np.nan, np.nan, np.nan, np.nan, np.nan]
-                p, s = fit
-                return [tag, p[1], s[1], p[2], s[2], p[3]]
-            tbl = pd.DataFrame([
-                ["Dataset", "mu (xc)", "±", "sigma (w)", "±", "Area A"],
-                tbl_row("Classical E", fit_cl_e),
-                tbl_row("PIE E", fit_pie_e),
-            ])
-            st.dataframe(tbl, use_container_width=True)
-
-            st.markdown("---")
-            # --- Overlay for S ---
-            st.markdown("### Stoichiometry (S) — Classical vs PIE")
-            nb_s = st.slider("Bins (S)", 20, 200, 80, 1, key="bins_s")
-            xmin_s = st.number_input("S min", value=float(np.nanmin([dfn[1].min(), dfn[3].min()])), format="%.6f", key="smin")
-            xmax_s = st.number_input("S max", value=float(np.nanmax([dfn[1].max(), dfn[3].max()])), format="%.6f", key="smax")
+            # S overlay
+            st.markdown("### Stoichiometry S — Classical vs PIE")
+            nb_s = st.slider("Bins (S)", 20, 200, 80, 1)
+            xmin_s = st.number_input("S min", value=float(np.nanmin([np.nanmin(S_cl), np.nanmin(S_pie)])), format="%.6f")
+            xmax_s = st.number_input("S max", value=float(np.nanmax([np.nanmax(S_cl), np.nanmax(S_pie)])), format="%.6f")
             edges_s = np.linspace(xmin_s, xmax_s, nb_s+1)
-            hist_cl_s, _ = np.histogram(dfn[1].values, bins=edges_s, weights=dfn[0].values, density=True)
-            hist_pie_s, _ = np.histogram(dfn[3].values, bins=edges_s, weights=dfn[2].values, density=True)
+            hist_cl_s, _ = np.histogram(S_cl, bins=edges_s, weights=W_S_cl, density=True)
+            hist_pie_s, _ = np.histogram(S_pie, bins=edges_s, weights=W_S_pie, density=True)
             centers_s = 0.5*(edges_s[:-1]+edges_s[1:])
-
             figS = go.Figure()
             figS.add_trace(go.Bar(x=centers_s, y=hist_cl_s, width=np.diff(edges_s), name="Classical (S)", opacity=0.45))
             figS.add_trace(go.Bar(x=centers_s, y=hist_pie_s, width=np.diff(edges_s), name="PIE (S)", opacity=0.45))
-
             fit_cl_s = try_gauss_fit(centers_s, hist_cl_s, xmin_s, xmax_s)
             fit_pie_s = try_gauss_fit(centers_s, hist_pie_s, xmin_s, xmax_s)
             if fit_cl_s:
-                p, s = fit_cl_s
-                xfit = np.linspace(xmin_s, xmax_s, 800); yfit = gaussian(xfit, *p)
-                figS.add_trace(go.Scatter(x=xfit, y=yfit, mode="lines", name="Classical fit (S)"))
+                p,_=fit_cl_s; xfit=np.linspace(xmin_s,xmax_s,800); figS.add_trace(go.Scatter(x=xfit,y=gaussian(xfit,*p),name="Classical fit (S)"))
             if fit_pie_s:
-                p, s = fit_pie_s
-                xfit = np.linspace(xmin_s, xmax_s, 800); yfit = gaussian(xfit, *p)
-                figS.add_trace(go.Scatter(x=xfit, y=yfit, mode="lines", name="PIE fit (S)"))
+                p,_=fit_pie_s; xfit=np.linspace(xmin_s,xmax_s,800); figS.add_trace(go.Scatter(x=xfit,y=gaussian(xfit,*p),name="PIE fit (S)"))
             figS.update_layout(xaxis_title="S", yaxis_title="Density")
             st.plotly_chart(figS, use_container_width=True)
