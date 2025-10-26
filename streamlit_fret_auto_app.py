@@ -309,11 +309,11 @@ colorscales = [
 tabs = st.tabs(
     [
         "Heatmap",
-        "Histogram (single)",
+        #"Histogram (single)",
         "Overlay",
         "Joint (Heatmap + Marginals)",
         "FRET Analysis",
-        "Compare multiple files (E)",
+        #"Compare multiple files (E)",
         "AUC Region Analyzer",
     ]
 )
