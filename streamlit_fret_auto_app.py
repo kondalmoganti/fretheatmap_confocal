@@ -248,6 +248,38 @@ def clamp_manual_bins_E(min_label, max_label, bins_label, default_bins=80, key_p
     centers = 0.5 * (edges[:-1] + edges[1:])
     return edges, centers
 
+def _ensure_edges_from_grid(x_edges_or_centers, nbins=None, rng=(0.0, 1.0)):
+    """
+    Return valid histogram *edges*.
+    - If an array of length >= 3 is passed, detect if it's edges or centers.
+    - If it's centers, convert to edges by mid-point interpolation.
+    - If nothing usable is passed, fall back to linspace over rng with nbins.
+    """
+    x = np.asarray(x_edges_or_centers) if x_edges_or_centers is not None else None
+
+    # Case 1: valid edges?
+    if x is not None and x.ndim == 1 and len(x) >= 2:
+        # If strictly increasing and looks like edges (monotone non-equal spacing OK)
+        if np.all(np.diff(x) > 0):
+            return x
+
+    # Case 2: centers → edges
+    if x is not None and x.ndim == 1 and len(x) >= 3:
+        diffs = np.diff(x)
+        # interior edges are midpoints between centers
+        inner = x[:-1] + diffs/2.0
+        # extrapolate first/last edges assuming same spacing at ends
+        first = x[0] - diffs[0]/2.0
+        last  = x[-1] + diffs[-1]/2.0
+        return np.r_[first, inner, last]
+
+    # Case 3: fall back
+    if nbins is None or nbins < 2:
+        nbins = 40
+    lo, hi = float(rng[0]), float(rng[1])
+    return np.linspace(lo, hi, nbins + 1)
+
+
 
 # -------------------------
 # UI - file upload
@@ -698,11 +730,28 @@ with tabs[3]:
             m = np.isfinite(x) & np.isfinite(w) & (w >= 0)
             h, _ = np.histogram(x[m], bins=edges, weights=w[m])
             return h
-
+        
         if match_bins:
-            e_edges, s_edges = e_edges_hm, s_edges_hm
-            e_x, s_y = e_centers_hm, s_centers_hm
-        else:
+            # e_edges_hm / s_edges_hm might actually be centers or even just grid sizes.
+            # Convert safely to *edges*; if unavailable, derive from heatmap shape.
+            # Expect you already have Z.shape == (nS, nE)
+            nE = Z.shape[1]
+            nS = Z.shape[0]
+        
+            # Try to build from provided arrays; otherwise from uniform grid [0,1]
+            e_edges = _ensure_edges_from_grid(e_edges_hm, nbins=nE, rng=(0.0, 1.0))
+            s_edges = _ensure_edges_from_grid(s_edges_hm, nbins=nS, rng=(0.0, 1.0))
+        
+            # Centers for plotting the lines/bars on top
+            e_x = 0.5 * (e_edges[:-1] + e_edges[1:])
+            s_y = 0.5 * (s_edges[:-1] + s_edges[1:])
+        
+            # Guard: need at least 2 edges for each axis
+            if (len(e_edges) < 2) or (len(s_edges) < 2):
+                st.warning("Heatmap grid too small to match histogram bins; falling back to auto bins.")
+                match_bins = False  # fall through to auto/manual below
+        
+        if not match_bins:
             bin_mode = st.radio(
                 "Histogram binning (for S/E)", ["Auto (rule)", "Manual"], index=0, key="joint_binmode_best"
             )
@@ -718,6 +767,7 @@ with tabs[3]:
                 s_edges, _ = clamp_manual_bins_E(
                     "S min", "S max", "S bins (manual)", default_bins=80, key_prefix="joint_S"
                 )
+        
             e_x = 0.5 * (e_edges[:-1] + e_edges[1:])
             s_y = 0.5 * (s_edges[:-1] + s_edges[1:])
 
