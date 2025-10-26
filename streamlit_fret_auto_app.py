@@ -1022,7 +1022,7 @@ with tabs[5]:
 # TAB 7: AUC Region Analyzer
 # -------------------------
 with tabs[6]:
-    st.subheader("AUC Region Analyzer – stacked histograms")
+    st.subheader("AUC Region Analyzer – stacked histograms (bars only)")
 
     files = st.file_uploader(
         "Upload one or more .dat files",
@@ -1037,57 +1037,73 @@ with tabs[6]:
         source = st.radio("E source", ["PIE", "Classical"], index=0, horizontal=True, key="auc_source_best")
         normalize = st.checkbox("Normalize each histogram area to 1", value=True, key="auc_norm_best")
 
+        # NEW: let user choose which 8-col block to use per file (if available)
+        preferred_idx = st.number_input(
+            "Preferred 8-column block index (applies to each file)",
+            min_value=0, value=1, step=1, key="auc_pref_idx"
+        )
+
         bin_mode = st.radio(
             "Binning", ["Auto (rule)", "Manual (fixed)"], index=0, horizontal=True, key="auc_binmode_best"
         )
         if bin_mode == "Auto (rule)":
             rule = st.selectbox(
-                "Auto-binning rule (shared)", ["Freedman–Diaconis", "Scott", "Sturges"], index=0, key="auc_rule_best"
+                "Auto-binning rule (shared)", ["Freedman–Diaconis", "Scott", "Sturges"],
+                index=0, key="auc_rule_best"
             )
             manual_edges = None
         else:
             manual_edges, _ = clamp_manual_bins_E(
-                "Range min (E)", "Range max (E)", "Number of bins (shared)", default_bins=80, key_prefix="auc"
+                "Range min (E)", "Range max (E)", "Number of bins (shared)",
+                default_bins=80, key_prefix="auc"
             )
 
         region = st.slider("AUC region (E-range)", 0.0, 1.0, (0.70, 1.00), 0.01, key="auc_region_best")
-        style = st.selectbox("Histogram style", ["Lines (smoothed)", "Bars"], index=0, key="auc_style_best")
-        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="auc_smooth_best")
 
-        datasets = []
+        # Force BAR histograms in this tab
+        style = "Bars"
+        smooth_bins = 0.0  # not used for bars
+
+        # ---- Load datasets (respect preferred block) ----
+        datasets = []  # list of tuples: (file_name, chosen_block_idx, E_array, W_array)
         for f in files:
             raw2 = f.getvalue().decode("utf-8", errors="ignore")
             blks = split_numeric_blocks_with_headers(raw2)
+
+            # find all 8+ column tables
             cand = [i for i, (df, _, _, _) in enumerate(blks) if blks[i][0].shape[1] >= 8]
             if not cand:
                 continue
-            df = blks[cand[0]][0].copy()
+
+            # choose preferred index if valid; else fallback to first 8-col block
+            pick = int(preferred_idx)
+            chosen = pick if pick in cand else cand[0]
+
+            df = blks[chosen][0].copy()
             df.columns = [
-                "Occur_S_Classical",
-                "S_Classical",
-                "Occur_S_PIE",
-                "S_PIE",
-                "E_Classical",
-                "Occur_E_Classical",
-                "E_PIE",
-                "Occur_E_PIE",
+                "Occur_S_Classical", "S_Classical",
+                "Occur_S_PIE", "S_PIE",
+                "E_Classical", "Occur_E_Classical",
+                "E_PIE", "Occur_E_PIE",
             ] + [f"Extra_{i}" for i in range(max(0, df.shape[1] - 8))]
+
             if source == "PIE":
                 E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
                 W = pd.to_numeric(df["Occur_E_PIE"], errors="coerce").to_numpy()
             else:
                 E = pd.to_numeric(df["E_Classical"], errors="coerce").to_numpy()
                 W = pd.to_numeric(df["Occur_E_Classical"], errors="coerce").to_numpy()
+
             m = np.isfinite(E) & np.isfinite(W) & (W >= 0)
             if np.any(m):
-                datasets.append((f.name, E[m], W[m]))
+                datasets.append((f.name, chosen, E[m], W[m]))
 
         if not datasets:
             st.warning("No valid 8-column blocks found across the files.")
         else:
-            # Build shared bins
+            # Build shared bins (either auto or manual)
             if manual_edges is None:
-                all_E = np.concatenate([E for _, E, _ in datasets])
+                all_E = np.concatenate([E for _, _, E, _ in datasets])
                 xmin = float(np.nanmin(all_E))
                 xmax = float(np.nanmax(all_E))
                 nb = auto_bins(all_E, rule=rule)
@@ -1099,7 +1115,7 @@ with tabs[6]:
             binw = np.diff(edges)[0]
 
             rows = []
-            for i, (nm, E, W) in enumerate(datasets):
+            for i, (nm, blk_idx, E, W) in enumerate(datasets):
                 hist, _ = np.histogram(E, bins=edges, weights=W, density=False)
                 y = hist.astype(float)
                 area_total = (y * binw).sum()
@@ -1107,17 +1123,15 @@ with tabs[6]:
                     y = y / area_total
 
                 fig = go.Figure()
-                if style.startswith("Lines"):
-                    ysm = gaussian_filter1d(y, sigma=smooth_bins) if smooth_bins > 0 else y
-                    fig.add_trace(go.Scatter(x=centers, y=ysm, mode="lines", name=nm))
-                else:
-                    fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.7)
+                # Bars only
+                fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.7)
 
                 fig.add_vrect(
-                    x0=region[0], x1=region[1], fillcolor="LightSalmon", opacity=0.25, layer="below", line_width=0
+                    x0=region[0], x1=region[1],
+                    fillcolor="LightSalmon", opacity=0.25, layer="below", line_width=0
                 )
                 fig.update_layout(
-                    title=nm,
+                    title=f"{nm} — block {blk_idx}",
                     xaxis_title="FRET efficiency, E",
                     yaxis_title=("Density (area=1)" if normalize else "Counts per bin"),
                     margin=dict(l=40, r=10, t=40, b=40),
@@ -1131,6 +1145,7 @@ with tabs[6]:
                 rows.append(
                     {
                         "file": nm,
+                        "block_used": blk_idx,
                         "bins": len(edges) - 1,
                         "E_min": edges[0],
                         "E_max": edges[-1],
