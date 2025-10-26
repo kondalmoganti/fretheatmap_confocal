@@ -735,8 +735,20 @@ with tabs[3]:
             # e_edges_hm / s_edges_hm might actually be centers or even just grid sizes.
             # Convert safely to *edges*; if unavailable, derive from heatmap shape.
             # Expect you already have Z.shape == (nS, nE)
-            nE = Z.shape[1]
-            nS = Z.shape[0]
+            try:
+                nE = Z.shape[1]
+                nS = Z.shape[0]
+            except NameError:
+                # fallback: try other known names
+                if "matrix_hm" in locals():
+                    nE = matrix_hm.shape[1]
+                    nS = matrix_hm.shape[0]
+                else:
+                    # ultimate fallback
+                    nE, nS = 40, 40
+
+            #nE = Z.shape[1]
+            #nS = Z.shape[0]
         
             # Try to build from provided arrays; otherwise from uniform grid [0,1]
             e_edges = _ensure_edges_from_grid(e_edges_hm, nbins=nE, rng=(0.0, 1.0))
