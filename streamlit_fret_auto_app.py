@@ -7,10 +7,9 @@ from plotly.subplots import make_subplots
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 
-st.set_page_config(page_title="FRET Analyzer – FULL (with compare)", layout="wide")
+st.set_page_config(page_title="FRET Analyzer – FULL (+ AUC Analyzer)", layout="wide")
 st.title("FRET Analyzer – FULL")
 
-# ---------- parsing ----------
 def split_numeric_blocks_with_headers(text: str):
     text = text.replace(",", ".")
     lines = text.splitlines()
@@ -37,7 +36,6 @@ def split_numeric_blocks_with_headers(text: str):
     if start_idx is not None: flush()
     return blocks
 
-# ---------- helpers ----------
 def gaussian(x, y0, mu, sigma, A):
     amp = A / (sigma * np.sqrt(2*np.pi))
     return y0 + amp * np.exp(-0.5 * ((x - mu)/sigma)**2)
@@ -101,8 +99,7 @@ def clean_pair(x, w):
 def fwhm_from_sigma(s):
     return 2*np.sqrt(2*np.log(2))*s
 
-# ---------- single-file uploader for first 5 tabs ----------
-uploaded = st.file_uploader("Upload your .dat file (for tabs 1–5)", type=["dat","txt","csv"], key="uploader_full_merge_v2")
+uploaded = st.file_uploader("Upload your .dat file (for tabs 1–5)", type=["dat","txt","csv"], key="uploader_full_auc2")
 if uploaded is None:
     st.info("Upload your file to continue."); st.stop()
 
@@ -111,21 +108,28 @@ blocks = split_numeric_blocks_with_headers(raw)
 
 colorscales = ["Viridis","Plasma","Magma","Inferno","Cividis","Turbo","IceFire","YlGnBu","Greys"]
 
-tabs = st.tabs(["Heatmap", "Histogram (single)", "Overlay", "Joint (Heatmap + Marginals)", "FRET Analysis (choose E: PIE/Classical)", "Compare multiple files (E)"])
+tabs = st.tabs([
+    "Heatmap",
+    "Histogram (single)",
+    "Overlay",
+    "Joint (Heatmap + Marginals)",
+    "FRET Analysis (choose E: PIE/Classical)",
+    "Compare multiple files (E)",
+    "AUC Region Analyzer"
+])
 
-# ---- Heatmap ----
 with tabs[0]:
     st.subheader("Correlogram Heatmap")
     mats = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
     if not mats: mats = list(range(len(blocks)))
-    iM = st.selectbox("Choose matrix block", mats, key="hm_block_merge_v2",
+    iM = st.selectbox("Choose matrix block", mats, key="hm_block_auc2",
                       format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
     dfm = blocks[iM][0].astype(float).replace([np.inf, -np.inf], np.nan)
     c1,c2,c3 = st.columns(3)
-    with c1: zmin = st.number_input("zmin (0=auto)", value=0.0, key="hm_zmin_merge_v2")
-    with c2: zmax = st.number_input("zmax (0=auto)", value=0.0, key="hm_zmax_merge_v2")
-    with c3: cmap = st.selectbox("Colorscale", colorscales, index=0, key="hm_cmap_merge_v2")
-    smooth = st.slider("Gaussian smoothing (σ)", 0.0, 6.0, 1.0, 0.1, key="hm_smooth_merge_v2")
+    with c1: zmin = st.number_input("zmin (0=auto)", value=0.0, key="hm_zmin_auc2")
+    with c2: zmax = st.number_input("zmax (0=auto)", value=0.0, key="hm_zmax_auc2")
+    with c3: cmap = st.selectbox("Colorscale", colorscales, index=0, key="hm_cmap_auc2")
+    smooth = st.slider("Gaussian smoothing (σ)", 0.0, 6.0, 1.0, 0.1, key="hm_smooth_auc2")
     arr = dfm.to_numpy()
     arrp = gaussian_filter1d(gaussian_filter1d(arr, sigma=smooth, axis=0), sigma=smooth, axis=1) if smooth>0 else arr
     fig = px.imshow(arrp, origin="lower", aspect="auto", color_continuous_scale=cmap,
@@ -133,14 +137,13 @@ with tabs[0]:
                     labels=dict(x="E bins (columns)", y="S bins (rows)", color="Counts"))
     st.plotly_chart(fig, use_container_width=True)
 
-# ---- Histogram (single) ----
 with tabs[1]:
     st.subheader("Histogram + Gaussian fit (single dataset)")
     tbls = list(range(len(blocks)))
-    iT = st.selectbox("Choose block", tbls, index=tbls[-1] if tbls else 0, key="single_block_merge_v2",
+    iT = st.selectbox("Choose block", tbls, index=tbls[-1] if tbls else 0, key="single_block_auc2",
                       format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
     dft = blocks[iT][0].copy()
-    templ = st.radio("Column template", ["Generic (C0..)", "FRET 8-cols (named)"], index=1, key="single_template_merge_v2")
+    templ = st.radio("Column template", ["Generic (C0..)", "FRET 8-cols (named)"], index=1, key="single_template_auc2")
     if templ == "FRET 8-cols (named)" and dft.shape[1] >= 8:
         base = ["Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
                 "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE"]
@@ -149,10 +152,10 @@ with tabs[1]:
     else:
         dft.columns = [f"C{j}" for j in range(dft.shape[1])]
     c1,c2,c3,c4 = st.columns(4)
-    with c1: x_col = st.selectbox("Values column (x)", dft.columns, index=0, key="single_xcol_merge_v2")
-    with c2: w_col = st.selectbox("Weights (optional)", ["(none)"]+list(dft.columns), index=0, key="single_wcol_merge_v2")
-    with c3: rule  = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="single_rule_merge_v2")
-    with c4: auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="single_autofit_merge_v2")
+    with c1: x_col = st.selectbox("Values column (x)", dft.columns, index=0, key="single_xcol_auc2")
+    with c2: w_col = st.selectbox("Weights (optional)", ["(none)"]+list(dft.columns), index=0, key="single_wcol_auc2")
+    with c3: rule  = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="single_rule_auc2")
+    with c4: auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="single_autofit_auc2")
     x = pd.to_numeric(dft[x_col], errors="coerce").to_numpy()
     w = None
     if w_col != "(none)":
@@ -169,24 +172,23 @@ with tabs[1]:
             figH.add_trace(go.Scatter(x=xs, y=gaussian(xs, *p), mode="lines", name=f"Gaussian fit (R²={R2:.3f})"))
     figH.update_layout(xaxis_title="Value", yaxis_title="Density"); st.plotly_chart(figH, use_container_width=True)
 
-# ---- Overlay ----
 with tabs[2]:
     st.subheader("Overlay: Classical vs PIE (E and S)")
     cand = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[1] >= 8]
     if not cand: st.info("No table with ≥8 columns found.")
     else:
-        iX = st.selectbox("Choose the 8+ column block", cand, key="ov_block_merge_v2",
+        iX = st.selectbox("Choose the 8+ column block", cand, key="ov_block_auc2",
                           format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
         dfX = blocks[iX][0].copy()
         base = ["Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
                 "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE"]
         extra = [f"Extra_{i}" for i in range(max(0, dfX.shape[1]-8))]
         dfX.columns = base + extra
-        mode = st.radio("Overlay variable", ["Stoichiometry S","FRET efficiency E"], index=0, key="ov_mode_merge_v2")
-        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="ov_rule_merge_v2")
-        auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="ov_autofit_merge_v2")
-        style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], index=0, key="ov_style_merge_v2")
-        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="ov_smooth_merge_v2")
+        mode = st.radio("Overlay variable", ["Stoichiometry S","FRET efficiency E"], index=0, key="ov_mode_auc2")
+        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="ov_rule_auc2")
+        auto_fit = st.checkbox("Auto-fit Gaussian", value=True, key="ov_autofit_auc2")
+        style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], index=0, key="ov_style_auc2")
+        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="ov_smooth_auc2")
         if mode == "Stoichiometry S":
             x_cl, w_cl = dfX["S_Classical"].to_numpy(), dfX["Occur._S_Classical"].to_numpy()
             x_pie, w_pie = dfX["S_PIE"].to_numpy(), dfX["Occur._S_PIE"].to_numpy()
@@ -217,10 +219,9 @@ with tabs[2]:
             if fit_pie: p,_,R2 = fit_pie; fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *p), mode="lines", name=f"{legends[1]} fit (R²={R2:.3f})"))
         fig.update_layout(xaxis_title=xlabel, yaxis_title="H [Occur.·10^3 Events] (density)"); st.plotly_chart(fig, use_container_width=True)
 
-# ---- Joint (Heatmap + S/E histograms) ----
 with tabs[3]:
     st.subheader("Joint view: S–E heatmap + S/E histograms (from 8‑col table)")
-    colorscale = st.selectbox("Heatmap colorscale", colorscales, index=0, key="joint_cmap_merge_v2")
+    colorscale = st.selectbox("Heatmap colorscale", colorscales, index=0, key="joint_cmap_auc2")
     mats = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
     t8   = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[1] >= 8]
     if not mats or not t8:
@@ -228,16 +229,16 @@ with tabs[3]:
     else:
         col1, col2 = st.columns(2)
         with col1:
-            iM = st.selectbox("Matrix block (S×E heatmap)", mats, key="joint_hm_block_merge_v2",
+            iM = st.selectbox("Matrix block (S×E heatmap)", mats, key="joint_hm_block_auc2",
                               format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
-            smooth = st.slider("Heatmap smoothing σ", 0.0, 6.0, 1.0, 0.1, key="joint_hm_smooth_merge_v2")
+            smooth = st.slider("Heatmap smoothing σ", 0.0, 6.0, 1.0, 0.1, key="joint_hm_smooth_auc2")
         with col2:
-            iT = st.selectbox("8‑col table block (S/E)", t8, key="joint_t8_block_merge_v2",
+            iT = st.selectbox("8‑col table block (S/E)", t8, key="joint_t8_block_auc2",
                               format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
-            which = st.selectbox("Histogram source", ["PIE", "Classical", "Both"], key="joint_hist_source_merge_v2")
-            match_bins = st.checkbox("Match histogram bins to heatmap grid", value=True, key="joint_match_bins_merge_v2")
-            style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], key="joint_style_merge_v2")
-            smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="joint_smooth_lines_merge_v2")
+            which = st.selectbox("Histogram source", ["PIE", "Classical", "Both"], key="joint_hist_source_auc2")
+            match_bins = st.checkbox("Match histogram bins to heatmap grid", value=True, key="joint_match_bins_auc2")
+            style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], key="joint_style_auc2")
+            smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="joint_smooth_lines_auc2")
         M = blocks[iM][0].astype(float).replace([np.inf, -np.inf], np.nan).to_numpy()
         Mplot = gaussian_filter1d(gaussian_filter1d(M, sigma=smooth, axis=0), sigma=smooth, axis=1) if smooth>0 else M.copy()
         ny, nx = Mplot.shape
@@ -294,25 +295,24 @@ with tabs[3]:
         figj.update_layout(coloraxis=dict(colorscale=colorscales[0]), showlegend=True, bargap=0, margin=dict(l=40,r=10,t=40,b=40))
         st.plotly_chart(figj, use_container_width=True)
 
-# ---- FRET Analysis (choose E: PIE or Classical) ----
 with tabs[4]:
     st.subheader("FRET – Histogram + Gaussian Fit (PIE or Classical, E only)")
     candidates = [i for i,(df,_,_,_) in enumerate(blocks) if blocks[i][0].shape[1] >= 8]
     if not candidates:
         st.info("No 8+ column table found in this file.")
     else:
-        iP = st.selectbox("Pick the 8-column block", candidates, key="fret_block_merge_v2",
+        iP = st.selectbox("Pick the 8-column block", candidates, key="fret_block_auc2",
                           format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
         df = blocks[iP][0].copy()
-        base = ["Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE","E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"]
+        base = ["Occur_E_S_Classical","S_Classical","Occur_S_PIE","S_PIE","E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"]
         extra = [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
         df.columns = base + extra
 
-        source = st.radio("E source", ["PIE", "Classical"], index=0, horizontal=True, key="fret_source_merge_v2")
-        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="fret_rule_merge_v2")
-        style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], index=0, key="fret_style_merge_v2")
-        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="fret_smooth_merge_v2")
-        do_fit = st.checkbox("Fit Gaussian", value=True, key="fret_fit_merge_v2")
+        source = st.radio("E source", ["PIE", "Classical"], index=0, horizontal=True, key="fret_source_auc2")
+        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="fret_rule_auc2")
+        style = st.selectbox("Histogram style", ["Bars","Lines (smoothed)"], index=0, key="fret_style_auc2")
+        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="fret_smooth_auc2")
+        do_fit = st.checkbox("Fit Gaussian", value=True, key="fret_fit_auc2")
 
         if source == "PIE":
             E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
@@ -358,19 +358,17 @@ with tabs[4]:
         fig.update_layout(xaxis_title="FRET efficiency, E", yaxis_title="Density")
         st.plotly_chart(fig, use_container_width=True)
 
-# ---- Compare multiple files ----
 with tabs[5]:
     st.subheader("Compare multiple files – overlay E histograms in a selected range")
-    files = st.file_uploader("Upload one or more .dat files", type=["dat","txt","csv"], accept_multiple_files=True, key="multi_uploader_v2")
+    files = st.file_uploader("Upload one or more .dat files", type=["dat","txt","csv"], accept_multiple_files=True, key="multi_uploader_auc2")
     if files:
-        source = st.radio("E source to compare", ["PIE", "Classical"], index=0, horizontal=True, key="multi_source_v2")
-        normalize = st.checkbox("Normalize each histogram area to 1", value=True, key="multi_norm_v2")
-        rule = st.selectbox("Auto-binning rule (shared)", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="multi_rule_v2")
-        style = st.selectbox("Histogram style", ["Lines (smoothed)","Bars"], index=0, key="multi_style_v2")
-        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="multi_smooth_v2")
-        region = st.slider("Analysis region (E-range)", 0.0, 1.0, (0.7, 1.0), 0.01, key="multi_region_v2")
+        source = st.radio("E source to compare", ["PIE", "Classical"], index=0, horizontal=True, key="multi_source_auc2")
+        normalize = st.checkbox("Normalize each histogram area to 1", value=True, key="multi_norm_auc2")
+        rule = st.selectbox("Auto-binning rule (shared)", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="multi_rule_auc2")
+        style = st.selectbox("Histogram style", ["Lines (smoothed)","Bars"], index=0, key="multi_style_auc2")
+        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="multi_smooth_auc2")
+        region = st.slider("Analysis region (E-range)", 0.0, 1.0, (0.7, 1.0), 0.01, key="multi_region_auc2")
 
-        # parse all, extract E and W, determine common bin edges
         all_E = []; all_W = []; names = []
         for f in files:
             raw2 = f.getvalue().decode("utf-8", errors="ignore")
@@ -387,8 +385,8 @@ with tabs[5]:
                 W = pd.to_numeric(df["Occur_E_Classical"], errors="coerce").to_numpy()
             m = np.isfinite(E) & np.isfinite(W) & (W>=0)
             all_E.append(E[m]); all_W.append(W[m]); names.append(f.name)
+
         if len(all_E) >= 1:
-            # common bins over union of E
             xmin = float(np.nanmin([np.nanmin(x) for x in all_E]))
             xmax = float(np.nanmax([np.nanmax(x) for x in all_E]))
             nb = auto_bins(np.concatenate(all_E), rule=rule)
@@ -400,7 +398,7 @@ with tabs[5]:
             for E, W, nm in zip(all_E, all_W, names):
                 hist, _ = np.histogram(E, bins=edges, weights=W, density=False)
                 if normalize:
-                    tot = hist.sum()
+                    tot = (hist*np.diff(edges)).sum()
                     y = hist / tot if tot>0 else hist.astype(float)
                 else:
                     y = hist.astype(float)
@@ -410,19 +408,99 @@ with tabs[5]:
                 else:
                     fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.5)
 
-                # fraction in region
                 rmin, rmax = region
                 mask_bins = (centers >= rmin) & (centers < rmax)
-                frac = y[mask_bins].sum() / y.sum() if y.sum()>0 else np.nan
-                summary.append({"file": nm, "fraction_in_region": frac})
+                auc = (y[mask_bins] * np.diff(edges)[0]).sum() if y.sum()>=0 else np.nan
+                frac = auc if normalize else auc / (y*np.diff(edges)[0]).sum() if (y.sum()>0) else np.nan
+                summary.append({"file": nm, "AUC_in_region": auc, "fraction_of_total": frac})
 
-            fig.update_layout(xaxis_title="FRET efficiency, E", yaxis_title=("Normalized counts" if normalize else "Counts"))
+            fig.update_layout(xaxis_title="FRET efficiency, E", yaxis_title=("Density (area=1)" if normalize else "Counts"))
             st.plotly_chart(fig, use_container_width=True)
 
             df_sum = pd.DataFrame(summary)
-            st.subheader("Population fraction in selected region")
+            st.subheader("Population in selected region")
             st.dataframe(df_sum, use_container_width=True)
-            st.download_button("Download fractions (CSV)", df_sum.to_csv(index=False).encode(), "region_fractions.csv", "text/csv")
+            st.download_button("Download AUC table (CSV)", df_sum.to_csv(index=False).encode(), "region_auc.csv", "text/csv")
     else:
         st.info("Upload multiple files to compare.")
+
+with tabs[6]:
+    st.subheader("AUC Region Analyzer – stacked histograms")
+    files = st.file_uploader("Upload one or more .dat files", type=["dat","txt","csv"], accept_multiple_files=True, key="auc_uploader2")
+    if not files:
+        st.info("Upload multiple files to start.")
+    else:
+        source = st.radio("E source", ["PIE", "Classical"], index=0, horizontal=True, key="auc_source2")
+        normalize = st.checkbox("Normalize each histogram area to 1", value=True, key="auc_norm2")
+        bin_mode = st.radio("Binning", ["Auto (rule)", "Manual (fixed)"], index=0, horizontal=True, key="auc_binmode2")
+        if bin_mode == "Auto (rule)":
+            rule = st.selectbox("Auto-binning rule (shared)", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="auc_rule2")
+            manual_bins = None; xmin_manual = None; xmax_manual = None
+        else:
+            c1,c2,c3 = st.columns(3)
+            with c1: manual_bins = st.number_input("Number of bins (shared)", min_value=5, max_value=400, value=80, step=1, key="auc_bins_n2")
+            with c2: xmin_manual   = st.number_input("Range min (E)", value=0.0, min_value=-1.0, max_value=2.0, step=0.01, key="auc_bins_min2")
+            with c3: xmax_manual   = st.number_input("Range max (E)", value=1.0, min_value=-1.0, max_value=2.0, step=0.01, key="auc_bins_max2")
+        region = st.slider("AUC region (E-range)", 0.0, 1.0, (0.70, 1.00), 0.01, key="auc_region2")
+        style = st.selectbox("Histogram style", ["Lines (smoothed)", "Bars"], index=0, key="auc_style2")
+        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="auc_smooth2")
+
+        datasets = []
+        for f in files:
+            raw2 = f.getvalue().decode("utf-8", errors="ignore")
+            blks = split_numeric_blocks_with_headers(raw2)
+            cand = [i for i,(df,_,_,_) in enumerate(blks) if blks[i][0].shape[1] >= 8]
+            if not cand: continue
+            df = blks[cand[0]][0].copy()
+            df.columns = ["Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE","E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"] + [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
+            if source == "PIE":
+                E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
+                W = pd.to_numeric(df["Occur_E_PIE"], errors="coerce").to_numpy()
+            else:
+                E = pd.to_numeric(df["E_Classical"], errors="coerce").to_numpy()
+                W = pd.to_numeric(df["Occur_E_Classical"], errors="coerce").to_numpy()
+            m = np.isfinite(E) & np.isfinite(W) & (W>=0)
+            datasets.append((f.name, E[m], W[m]))
+
+        if not datasets:
+            st.warning("No valid 8-column blocks found across the files.")
+        else:
+            if bin_mode == "Auto (rule)":
+                all_E = np.concatenate([E for _,E,_ in datasets])
+                xmin = float(np.nanmin(all_E)); xmax = float(np.nanmax(all_E))
+                nb = auto_bins(all_E, rule=rule)
+                edges = np.linspace(xmin, xmax, nb+1)
+            else:
+                xmin = float(xmin_manual); xmax = float(xmax_manual); nb = int(manual_bins)
+                if xmax <= xmin: xmax = xmin + 1e-6
+                edges = np.linspace(xmin, xmax, nb+1)
+            centers = 0.5*(edges[:-1]+edges[1:]); binw = np.diff(edges)[0]
+
+            rows = []
+            for nm, E, W in datasets:
+                hist, _ = np.histogram(E, bins=edges, weights=W, density=False)
+                y = hist.astype(float)
+                area_total = (y*binw).sum()
+                if normalize and area_total>0:
+                    y = y / area_total
+                rmin, rmax = region
+                mask_bins = (centers >= rmin) & (centers < rmax)
+                auc = (y[mask_bins] * binw).sum()
+
+                fig = go.Figure()
+                if style.startswith("Lines"):
+                    ysm = gaussian_filter1d(y, sigma=smooth_bins) if smooth_bins>0 else y
+                    fig.add_trace(go.Scatter(x=centers, y=ysm, mode="lines", name=nm))
+                else:
+                    fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.7)
+                fig.add_vrect(x0=rmin, x1=rmax, fillcolor="LightSalmon", opacity=0.25, layer="below", line_width=0)
+                fig.update_layout(title=nm, xaxis_title="FRET efficiency, E", yaxis_title=("Density (area=1)" if normalize else "Counts per bin"), margin=dict(l=40,r=10,t=40,b=40), showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+
+                rows.append({"file": nm, "bins": nb, "E_min": xmin, "E_max": xmax, "region_min": rmin, "region_max": rmax, "AUC_in_region": auc, "normalized": normalize})
+
+            df_auc = pd.DataFrame(rows)
+            st.subheader("AUC summary for selected region")
+            st.dataframe(df_auc, use_container_width=True)
+            st.download_button("Download AUC summary (CSV)", df_auc.to_csv(index=False).encode(), "auc_region_summary.csv", "text/csv")
 
