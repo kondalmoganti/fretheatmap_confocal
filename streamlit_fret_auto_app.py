@@ -14,14 +14,17 @@ st.title("FRET Analyzer – FULL (Best Auto-fit + Manual bins)")
 # Parsing
 # =========================
 def split_numeric_blocks_with_headers(text: str):
+    """Split a mixed .dat file into numeric blocks (tables/matrices)."""
     text = text.replace(",", ".")
     lines = text.splitlines()
     blocks = []
     cur = []; header_buf = []; start_idx = None
     isnum = re.compile(r'^\s*[\d\.eE\-\+]+([\s\t,;][\d\.eE\-\+]+)*\s*$').match
+
     def flush():
         nonlocal cur, header_buf, start_idx
-        if not cur: return
+        if not cur:
+            return
         s = "\n".join(cur).strip()
         try:
             df = pd.read_csv(io.StringIO(s), sep=r"[\s,;]+", engine="python", header=None)
@@ -29,14 +32,19 @@ def split_numeric_blocks_with_headers(text: str):
         except Exception:
             pass
         cur = []; start_idx = None
+
     for i, ln in enumerate(lines):
         if isnum(ln):
-            if start_idx is None: start_idx = i
+            if start_idx is None:
+                start_idx = i
             cur.append(ln)
         else:
-            header_buf.append(ln.strip()); header_buf = header_buf[-3:]
-            if start_idx is not None: flush()
-    if start_idx is not None: flush()
+            header_buf.append(ln.strip())
+            header_buf = header_buf[-3:]
+            if start_idx is not None:
+                flush()
+    if start_idx is not None:
+        flush()
     return blocks
 
 # =========================
@@ -51,38 +59,40 @@ def gaussian2(x, y0, mu1, s1, A1, mu2, s2, A2):
 
 def r2_score(y, yhat):
     y = np.asarray(y); yhat = np.asarray(yhat)
-    ss_res = np.nansum((y - yhat)**2); ss_tot = np.nansum((y - np.nanmean(y))**2)
-    return 1 - ss_res/ss_tot if ss_tot>0 else np.nan
+    ss_res = np.nansum((y - yhat)**2)
+    ss_tot = np.nansum((y - np.nanmean(y))**2)
+    return 1 - ss_res/ss_tot if ss_tot > 0 else np.nan
 
 def aicc(n, rss, k):
     if n <= k + 1:
         return np.inf
     return n*np.log(rss/n) + 2*k + (2*k*(k+1))/(n - k - 1)
 
-def auto_bins(x, rule="Freedman–Diaconis", nb_fallback=80):
+def auto_bins(x, rule="Freedman–Diaconis"):
     x = np.asarray(x, float)
     x = x[np.isfinite(x)]
     n = x.size
-    if n < 2: return nb_fallback
+    if n < 2:
+        return 40
     if rule == "Freedman–Diaconis":
         iqr = np.subtract(*np.percentile(x, [75,25]))
-        if iqr == 0: return max(10, min(200, int(np.sqrt(n))))
+        if iqr == 0:
+            return int(np.clip(np.sqrt(n), 10, 200))
         bw = 2 * iqr * (n ** (-1/3))
     elif rule == "Scott":
         std = np.nanstd(x, ddof=1)
-        if std == 0: return max(10, min(200, int(np.sqrt(n))))
+        if std == 0:
+            return int(np.clip(np.sqrt(n), 10, 200))
         bw = 3.5 * std * (n ** (-1/3))
     else:
-        return max(10, min(200, int(np.ceil(np.log2(n)+1))))
+        return int(np.clip(np.ceil(np.log2(n)+1), 10, 200))
     rng = np.nanmax(x) - np.nanmin(x)
-    if rng <= 0: return max(10, min(200, int(np.sqrt(n))))
+    if rng <= 0:
+        return int(np.clip(np.sqrt(n), 10, 200))
     return int(np.clip(np.ceil(rng/bw), 10, 200))
 
-def fwhm_from_sigma(s):
-    return 2*np.sqrt(2*np.log(2))*s
-
-# ----- Best auto-fit used across tabs (tries 1G and 2G, picks by AICc + sanity)
 def best_autofit(centers, hist, xmin, xmax):
+    """Try 1-Gaussian and 2-Gaussian; pick by AICc with simple separation sanity."""
     z = np.asarray(hist, float); x = np.asarray(centers, float)
     m = np.isfinite(z) & np.isfinite(x)
     x, z = x[m], z[m]
@@ -90,7 +100,6 @@ def best_autofit(centers, hist, xmin, xmax):
         return None
 
     z_s = gaussian_filter1d(z, sigma=max(1, int(len(z)*0.03)))
-
     binw = np.median(np.diff(x))
     sig_min = max(0.5*binw, 1e-4)
     sig_max = max((xmax-xmin)/1.25, sig_min*2)
@@ -231,44 +240,50 @@ with tabs[1]:
     do_fit = st.checkbox("Run best auto-fit (1G/2G)", value=True, key="single_autofit_best")
 
     x = pd.to_numeric(dft[x_col], errors="coerce").to_numpy()
-    w = None
     if w_col != "(none)":
         w = pd.to_numeric(dft[w_col], errors="coerce").to_numpy()
         w = np.where(np.isfinite(w) & (w>0), w, 0.0)
-    m = np.isfinite(x); xmin = float(np.nanmin(x[m])); xmax = float(np.nanmax(x[m]))
-    if bin_mode == "Auto (rule)":
-        nb = auto_bins(x[m], rule=rule); edges = np.linspace(xmin, xmax, nb+1)
     else:
-        x0, x1 = float(xmin_man), float(xmax_man)
-        if x1 <= x0: x1 = x0 + 1e-6
-        nb = int(nb_manual); edges = np.linspace(x0, x1, nb+1)
-    centers = 0.5*(edges[:-1]+edges[1:])
-    hist, _ = np.histogram(x[m], bins=edges, weights=w if w is not None else None, density=True)
-    figH = go.Figure()
-    if style == "Bars":
-        figH.add_bar(x=centers, y=hist, width=np.diff(edges), name="Histogram", opacity=0.55)
+        w = None
+    m = np.isfinite(x)
+    if not np.any(m):
+        st.warning("No finite values in the chosen column.")
     else:
-        y = gaussian_filter1d(hist, sigma=smooth_bins) if smooth_bins>0 else hist
-        figH.add_trace(go.Scatter(x=centers, y=y, mode="lines", name="Histogram"))
-    if do_fit:
-        fit = best_autofit(centers, hist, edges[0], edges[-1])
-        if fit:
-            xs = np.linspace(edges[0], edges[-1], 1000)
-            if fit["model"] == "1G":
-                figH.add_trace(go.Scatter(x=xs, y=gaussian(xs, *fit["params"]), mode="lines", name=f"Best fit 1G (R²={fit['R2']:.3f})"))
-            else:
-                y0, m1, s1, A1, m2, s2, A2 = fit["params"]
-                figH.add_trace(go.Scatter(x=xs, y=gaussian2(xs, *fit["params"]), mode="lines", name=f"Best fit 2G (R²={fit['R2']:.3f})"))
-                figH.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m1, s1, A1)-y0, mode="lines", name="Component 1", line=dict(dash="dash")))
-                figH.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m2, s2, A2)-y0, mode="lines", name="Component 2", line=dict(dash="dash")))
-    figH.update_layout(xaxis_title="Value", yaxis_title="Density")
-    st.plotly_chart(figH, use_container_width=True)
+        xmin = float(np.nanmin(x[m])); xmax = float(np.nanmax(x[m]))
+        if bin_mode == "Auto (rule)":
+            nb = auto_bins(x[m], rule=rule); edges = np.linspace(xmin, xmax, nb+1)
+        else:
+            x0, x1 = float(xmin_man), float(xmax_man)
+            if x1 <= x0: x1 = x0 + 1e-6
+            nb = int(nb_manual); edges = np.linspace(x0, x1, nb+1)
+        centers = 0.5*(edges[:-1]+edges[1:])
+        hist, _ = np.histogram(x[m], bins=edges, weights=w if w is not None else None, density=True)
+        figH = go.Figure()
+        if style == "Bars":
+            figH.add_bar(x=centers, y=hist, width=np.diff(edges), name="Histogram", opacity=0.55)
+        else:
+            y = gaussian_filter1d(hist, sigma=smooth_bins) if smooth_bins>0 else hist
+            figH.add_trace(go.Scatter(x=centers, y=y, mode="lines", name="Histogram"))
+        if do_fit:
+            fit = best_autofit(centers, hist, edges[0], edges[-1])
+            if fit:
+                xs = np.linspace(edges[0], edges[-1], 1000)
+                if fit["model"] == "1G":
+                    figH.add_trace(go.Scatter(x=xs, y=gaussian(xs, *fit["params"]), mode="lines", name=f"Best fit 1G (R²={fit['R2']:.3f})"))
+                else:
+                    y0,m1,s1,A1,m2,s2,A2 = fit["params"]
+                    figH.add_trace(go.Scatter(x=xs, y=gaussian2(xs, *fit["params"]), mode="lines", name=f"Best fit 2G (R²={fit['R2']:.3f})"))
+                    figH.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m1, s1, A1)-y0, mode="lines", name="Component 1", line=dict(dash="dash")))
+                    figH.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m2, s2, A2)-y0, mode="lines", name="Component 2", line=dict(dash="dash")))
+        figH.update_layout(xaxis_title="Value", yaxis_title="Density")
+        st.plotly_chart(figH, use_container_width=True)
 
 # ---- Overlay ----
 with tabs[2]:
     st.subheader("Overlay: Classical vs PIE (S or E) + Best Auto-fit per curve")
     cand = [i for i,(df,_,_,_) in enumerate(blocks) if df.shape[1] >= 8]
-    if not cand: st.info("No table with ≥8 columns found.")
+    if not cand:
+        st.info("No table with ≥8 columns found.")
     else:
         iX = st.selectbox("Choose the 8+ column block", cand, key="ov_block_best",
                           format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
@@ -277,6 +292,7 @@ with tabs[2]:
                 "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE"]
         extra = [f"Extra_{i}" for i in range(max(0, dfX.shape[1]-8))]
         dfX.columns = base + extra
+
         mode = st.radio("Overlay variable", ["Stoichiometry S","FRET efficiency E"], index=0, key="ov_mode_best")
         bin_mode = st.radio("Binning", ["Auto (rule)","Manual"], index=0, key="ov_binmode_best")
         if bin_mode == "Auto (rule)":
@@ -299,60 +315,64 @@ with tabs[2]:
             x_pie, w_pie = dfX["E_PIE"].to_numpy(), dfX["Occur._E_PIE"].to_numpy()
             xlabel = "FRET efficiency [E]"; legends = ("Classical (E)", "PIE (E)")
 
+        # ---- PATCHED: robust cleaning for arrays/series
         def clean_pair(x, w):
-            x = pd.to_numeric(x, errors="coerce").to_numpy()
-            w = pd.to_numeric(w, errors="coerce").to_numpy()
-            m = np.isfinite(x) & np.isfinite(w) & (w>=0)
+            x = np.asarray(pd.to_numeric(x, errors="coerce"))
+            w = np.asarray(pd.to_numeric(w, errors="coerce"))
+            m = np.isfinite(x) & np.isfinite(w) & (w >= 0)
             return x[m], w[m]
 
-        x_cl, w_cl = clean_pair(x_cl, w_cl); x_pie, w_pie = clean_pair(x_pie, w_pie)
+        x_cl, w_cl = clean_pair(x_cl, w_cl)
+        x_pie, w_pie = clean_pair(x_pie, w_pie)
 
-        if bin_mode == "Auto (rule)":
-            xmin = float(np.nanmin([np.nanmin(x_cl), np.nanmin(x_pie)]))
-            xmax = float(np.nanmax([np.nanmax(x_cl), np.nanmax(x_pie)]))
-            nb = auto_bins(np.concatenate([x_cl, x_pie]), rule=rule); edges = np.linspace(xmin, xmax, nb+1)
+        if x_cl.size == 0 or x_pie.size == 0:
+            st.warning("No finite data found for the selected columns.")
         else:
-            x0, x1 = float(xmin_man), float(xmax_man)
-            if x1 <= x0: x1 = x0 + 1e-6
-            nb = int(nb_manual); edges = np.linspace(x0, x1, nb+1)
-
-        centers = 0.5*(edges[:-1]+edges[1:])
-        hist_cl, _ = np.histogram(x_cl, bins=edges, weights=w_cl, density=True)
-        hist_pie, _ = np.histogram(x_pie, bins=edges, weights=w_pie, density=True)
-
-        fig = go.Figure()
-        def add_curve(name, hist, color=None):
-            if style == "Bars":
-                fig.add_bar(x=centers, y=hist, width=np.diff(edges), name=name, opacity=0.5)
+            if bin_mode == "Auto (rule)":
+                xmin = float(np.nanmin([np.nanmin(x_cl), np.nanmin(x_pie)]))
+                xmax = float(np.nanmax([np.nanmax(x_cl), np.nanmax(x_pie)]))
+                nb = auto_bins(np.concatenate([x_cl, x_pie]), rule=rule); edges = np.linspace(xmin, xmax, nb+1)
             else:
-                y = gaussian_filter1d(hist, sigma=smooth_bins) if smooth_bins>0 else hist
-                fig.add_trace(go.Scatter(x=centers, y=y, mode="lines", name=name))
+                x0, x1 = float(xmin_man), float(xmax_man)
+                if x1 <= x0: x1 = x0 + 1e-6
+                nb = int(nb_manual); edges = np.linspace(x0, x1, nb+1)
 
-        add_curve(legends[0], hist_cl)
-        add_curve(legends[1], hist_pie)
+            centers = 0.5*(edges[:-1]+edges[1:])
+            hist_cl, _ = np.histogram(x_cl, bins=edges, weights=w_cl, density=True)
+            hist_pie, _ = np.histogram(x_pie, bins=edges, weights=w_pie, density=True)
 
-        if do_fit:
-            xs = np.linspace(edges[0], edges[-1], 1000)
-            fit_cl = best_autofit(centers, hist_cl, edges[0], edges[-1])
-            fit_pie = best_autofit(centers, hist_pie, edges[0], edges[-1])
-            if fit_cl:
-                if fit_cl["model"]=="1G":
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *fit_cl["params"]), mode="lines", name=f"{legends[0]} fit 1G (R²={fit_cl['R2']:.3f})"))
+            fig = go.Figure()
+            def add_curve(name, hist):
+                if style == "Bars":
+                    fig.add_bar(x=centers, y=hist, width=np.diff(edges), name=name, opacity=0.5)
                 else:
-                    y0,m1,s1,A1,m2,s2,A2 = fit_cl["params"]
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian2(xs, *fit_cl["params"]), mode="lines", name=f"{legends[0]} fit 2G (R²={fit_cl['R2']:.3f})"))
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m1, s1, A1)-y0, mode="lines", name=f"{legends[0]} comp1", line=dict(dash="dash")))
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m2, s2, A2)-y0, mode="lines", name=f"{legends[0]} comp2", line=dict(dash="dash")))
-            if fit_pie:
-                if fit_pie["model"]=="1G":
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *fit_pie["params"]), mode="lines", name=f"{legends[1]} fit 1G (R²={fit_pie['R2']:.3f})"))
-                else:
-                    y0,m1,s1,A1,m2,s2,A2 = fit_pie["params"]
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian2(xs, *fit_pie["params"]), mode="lines", name=f"{legends[1]} fit 2G (R²={fit_pie['R2']:.3f})"))
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m1, s1, A1)-y0, mode="lines", name=f"{legends[1]} comp1", line=dict(dash="dash")))
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m2, s2, A2)-y0, mode="lines", name=f"{legends[1]} comp2", line=dict(dash="dash")))
-        fig.update_layout(xaxis_title=xlabel, yaxis_title="Density")
-        st.plotly_chart(fig, use_container_width=True)
+                    y = gaussian_filter1d(hist, sigma=smooth_bins) if smooth_bins>0 else hist
+                    fig.add_trace(go.Scatter(x=centers, y=y, mode="lines", name=name))
+            add_curve(legends[0], hist_cl)
+            add_curve(legends[1], hist_pie)
+
+            if do_fit:
+                xs = np.linspace(edges[0], edges[-1], 1000)
+                fit_cl = best_autofit(centers, hist_cl, edges[0], edges[-1])
+                fit_pie = best_autofit(centers, hist_pie, edges[0], edges[-1])
+                if fit_cl:
+                    if fit_cl["model"]=="1G":
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *fit_cl["params"]), mode="lines", name=f"{legends[0]} fit 1G (R²={fit_cl['R2']:.3f})"))
+                    else:
+                        y0,m1,s1,A1,m2,s2,A2 = fit_cl["params"]
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian2(xs, *fit_cl["params"]), mode="lines", name=f"{legends[0]} fit 2G (R²={fit_cl['R2']:.3f})"))
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m1, s1, A1)-y0, mode="lines", name=f"{legends[0]} comp1", line=dict(dash="dash")))
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m2, s2, A2)-y0, mode="lines", name=f"{legends[0]} comp2", line=dict(dash="dash")))
+                if fit_pie:
+                    if fit_pie["model"]=="1G":
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *fit_pie["params"]), mode="lines", name=f"{legends[1]} fit 1G (R²={fit_pie['R2']:.3f})"))
+                    else:
+                        y0,m1,s1,A1,m2,s2,A2 = fit_pie["params"]
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian2(xs, *fit_pie["params"]), mode="lines", name=f"{legends[1]} fit 2G (R²={fit_pie['R2']:.3f})"))
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m1, s1, A1)-y0, mode="lines", name=f"{legends[1]} comp1", line=dict(dash="dash")))
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m2, s2, A2)-y0, mode="lines", name=f"{legends[1]} comp2", line=dict(dash="dash")))
+            fig.update_layout(xaxis_title=xlabel, yaxis_title="Density")
+            st.plotly_chart(fig, use_container_width=True)
 
 # ---- Joint ----
 with tabs[3]:
@@ -456,7 +476,8 @@ with tabs[4]:
         iP = st.selectbox("Pick the 8-column block", candidates, key="fret_block_best",
                           format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})")
         df = blocks[iP][0].copy()
-        base = ["Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE","E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"]
+        base = ["Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE",
+                "E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"]
         extra = [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
         df.columns = base + extra
 
@@ -487,32 +508,35 @@ with tabs[4]:
 
         m = np.isfinite(E) & np.isfinite(W) & (W>=0)
         E, W = E[m], W[m]
-        if edges is None:
-            nb = auto_bins(E, rule=rule); xmin, xmax = float(np.nanmin(E)), float(np.nanmax(E))
-            edges = np.linspace(xmin, xmax, nb+1)
-        centers = 0.5*(edges[:-1]+edges[1:])
-        hist, _ = np.histogram(E, bins=edges, weights=W, density=True)
-
-        fig = go.Figure()
-        if style == "Bars":
-            fig.add_bar(x=centers, y=hist, width=np.diff(edges), name=f"{label} histogram", opacity=0.55)
+        if E.size == 0:
+            st.warning("No finite E values in this block.")
         else:
-            y = gaussian_filter1d(hist, sigma=smooth_bins) if smooth_bins>0 else hist
-            fig.add_trace(go.Scatter(x=centers, y=y, mode="lines", name=label))
+            if edges is None:
+                nb = auto_bins(E, rule=rule); xmin, xmax = float(np.nanmin(E)), float(np.nanmax(E))
+                edges = np.linspace(xmin, xmax, nb+1)
+            centers = 0.5*(edges[:-1]+edges[1:])
+            hist, _ = np.histogram(E, bins=edges, weights=W, density=True)
 
-        if do_fit:
-            fit = best_autofit(centers, hist, edges[0], edges[-1])
-            if fit:
-                xs = np.linspace(edges[0], edges[-1], 1000)
-                if fit["model"] == "1G":
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *fit["params"]), mode="lines", name=f"Best fit 1G (R²={fit['R2']:.3f})"))
-                else:
-                    y0,m1,s1,A1,m2,s2,A2 = fit["params"]
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian2(xs, *fit["params"]), mode="lines", name=f"Best fit 2G (R²={fit['R2']:.3f})"))
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m1, s1, A1)-y0, mode="lines", name="Component 1", line=dict(dash="dash")))
-                    fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m2, s2, A2)-y0, mode="lines", name="Component 2", line=dict(dash="dash")))
-        fig.update_layout(xaxis_title="FRET efficiency, E", yaxis_title="Density")
-        st.plotly_chart(fig, use_container_width=True)
+            fig = go.Figure()
+            if style == "Bars":
+                fig.add_bar(x=centers, y=hist, width=np.diff(edges), name=f"{label} histogram", opacity=0.55)
+            else:
+                y = gaussian_filter1d(hist, sigma=smooth_bins) if smooth_bins>0 else hist
+                fig.add_trace(go.Scatter(x=centers, y=y, mode="lines", name=label))
+
+            if do_fit:
+                fit = best_autofit(centers, hist, edges[0], edges[-1])
+                if fit:
+                    xs = np.linspace(edges[0], edges[-1], 1000)
+                    if fit["model"] == "1G":
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, *fit["params"]), mode="lines", name=f"Best fit 1G (R²={fit['R2']:.3f})"))
+                    else:
+                        y0,m1,s1,A1,m2,s2,A2 = fit["params"]
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian2(xs, *fit["params"]), mode="lines", name=f"Best fit 2G (R²={fit['R2']:.3f})"))
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m1, s1, A1)-y0, mode="lines", name="Component 1", line=dict(dash="dash")))
+                        fig.add_trace(go.Scatter(x=xs, y=gaussian(xs, y0, m2, s2, A2)-y0, mode="lines", name="Component 2", line=dict(dash="dash")))
+            fig.update_layout(xaxis_title="FRET efficiency, E", yaxis_title="Density")
+            st.plotly_chart(fig, use_container_width=True)
 
 # ---- Compare multiple files ----
 with tabs[5]:
@@ -537,12 +561,13 @@ with tabs[5]:
         smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="multi_smooth_best")
         region = st.slider("Analysis region (E-range)", 0.0, 1.0, (0.7, 1.0), 0.01, key="multi_region_best")
 
-        all_E = []; all_W = []; names = []
+        all_E, all_W, names = [], [], []
         for f in files:
             raw2 = f.getvalue().decode("utf-8", errors="ignore")
             blks = split_numeric_blocks_with_headers(raw2)
             cand = [i for i,(df,_,_,_) in enumerate(blks) if blks[i][0].shape[1] >= 8]
-            if not cand: continue
+            if not cand:
+                continue
             df = blks[cand[0]][0].copy()
             df.columns = ["Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE","E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"] + [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
             if source == "PIE":
@@ -552,129 +577,7 @@ with tabs[5]:
                 E = pd.to_numeric(df["E_Classical"], errors="coerce").to_numpy()
                 W = pd.to_numeric(df["Occur_E_Classical"], errors="coerce").to_numpy()
             m = np.isfinite(E) & np.isfinite(W) & (W>=0)
-            all_E.append(E[m]); all_W.append(W[m]); names.append(f.name)
+            if np.any(m):
+                all_E.append(E[m]); all_W.append(W[m]); names.append(f.name)
 
-        if len(all_E) >= 1:
-            if edges is None:
-                xmin = float(np.nanmin([np.nanmin(x) for x in all_E]))
-                xmax = float(np.nanmax([np.nanmax(x) for x in all_E]))
-                nb = auto_bins(np.concatenate(all_E), rule=rule)
-                edges = np.linspace(xmin, xmax, nb+1)
-            centers = 0.5*(edges[:-1] + edges[1:])
-            binw = np.diff(edges)[0]
-
-            fig = go.Figure()
-            summary = []
-            for E, W, nm in zip(all_E, all_W, names):
-                hist, _ = np.histogram(E, bins=edges, weights=W, density=False)
-                y = hist.astype(float)
-                area_tot = (y*binw).sum()
-                if normalize and area_tot>0: y = y/area_tot
-                if style.startswith("Lines"):
-                    yy = gaussian_filter1d(y, sigma=smooth_bins) if smooth_bins>0 else y
-                    fig.add_trace(go.Scatter(x=centers, y=yy, mode="lines", name=nm))
-                else:
-                    fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.5)
-
-                rmin, rmax = region
-                mask_bins = (centers >= rmin) & (centers < rmax)
-                auc = (y[mask_bins] * binw).sum()
-                summary.append({"file": nm, "AUC_in_region": auc, "fraction_of_total": auc if normalize else auc/area_tot if area_tot>0 else np.nan})
-
-            fig.update_layout(xaxis_title="FRET efficiency, E", yaxis_title=("Density (area=1)" if normalize else "Counts"))
-            st.plotly_chart(fig, use_container_width=True)
-
-            df_sum = pd.DataFrame(summary)
-            st.subheader("Population in selected region")
-            st.dataframe(df_sum, use_container_width=True)
-            st.download_button("Download AUC table (CSV)", df_sum.to_csv(index=False).encode(), "region_auc.csv", "text/csv")
-    else:
-        st.info("Upload multiple files to compare.")
-
-# ---- AUC Region Analyzer ----
-with tabs[6]:
-    st.subheader("AUC Region Analyzer – stacked histograms")
-    files = st.file_uploader("Upload one or more .dat files", type=["dat","txt","csv"], accept_multiple_files=True, key="auc_uploader_best")
-    if not files:
-        st.info("Upload multiple files to start.")
-    else:
-        source = st.radio("E source", ["PIE", "Classical"], index=0, horizontal=True, key="auc_source_best")
-        normalize = st.checkbox("Normalize each histogram area to 1", value=True, key="auc_norm_best")
-        bin_mode = st.radio("Binning", ["Auto (rule)", "Manual (fixed)"], index=0, horizontal=True, key="auc_binmode_best")
-        if bin_mode == "Auto (rule)":
-            rule = st.selectbox("Auto-binning rule (shared)", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="auc_rule_best")
-            manual_bins = None; xmin_manual = None; xmax_manual = None
-        else:
-            c1,c2,c3 = st.columns(3)
-            with c1: manual_bins = st.number_input("Number of bins (shared)", min_value=5, max_value=400, value=80, step=1, key="auc_bins_n_best")
-            with c2: xmin_manual   = st.number_input("Range min (E)", value=0.0, min_value=-1.0, max_value=2.0, step=0.01, key="auc_bins_min_best")
-            with c3: xmax_manual   = st.number_input("Range max (E)", value=1.0, min_value=-1.0, max_value=2.0, step=0.01, key="auc_bins_max_best")
-        region = st.slider("AUC region (E-range)", 0.0, 1.0, (0.70, 1.00), 0.01, key="auc_region_best")
-        style = st.selectbox("Histogram style", ["Lines (smoothed)", "Bars"], index=0, key="auc_style_best")
-        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="auc_smooth_best")
-
-        datasets = []
-        for f in files:
-            raw2 = f.getvalue().decode("utf-8", errors="ignore")
-            blks = split_numeric_blocks_with_headers(raw2)
-            cand = [i for i,(df,_,_,_) in enumerate(blks) if blks[i][0].shape[1] >= 8]
-            if not cand: continue
-            df = blks[cand[0]][0].copy()
-            df.columns = ["Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE","E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"] + [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
-            if source == "PIE":
-                E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
-                W = pd.to_numeric(df["Occur_E_PIE"], errors="coerce").to_numpy()
-            else:
-                E = pd.to_numeric(df["E_Classical"], errors="coerce").to_numpy()
-                W = pd.to_numeric(df["Occur_E_Classical"], errors="coerce").to_numpy()
-            m = np.isfinite(E) & np.isfinite(W) & (W>=0)
-            datasets.append((f.name, E[m], W[m]))
-
-        if not datasets:
-            st.warning("No valid 8-column blocks found across the files.")
-        else:
-            if bin_mode == "Auto (rule)":
-                all_E = np.concatenate([E for _,E,_ in datasets])
-                xmin = float(np.nanmin(all_E)); xmax = float(np.nanmax(all_E))
-                nb = auto_bins(all_E, rule=rule)
-                edges = np.linspace(xmin, xmax, nb+1)
-            else:
-                xmin = float(xmin_manual); xmax = float(xmax_manual); nb = int(manual_bins)
-                if xmax <= xmin: xmax = xmin + 1e-6
-                edges = np.linspace(xmin, xmax, nb+1)
-            centers = 0.5*(edges[:-1]+edges[1:])
-            binw = np.diff(edges)[0]
-
-            rows = []
-            for nm, E, W in datasets:
-                hist, _ = np.histogram(E, bins=edges, weights=W, density=False)
-                y = hist.astype(float)
-                area_total = (y*binw).sum()
-                if normalize and area_total>0:
-                    y = y / area_total
-                rmin, rmax = region
-                mask_bins = (centers >= rmin) & (centers < rmax)
-                auc = (y[mask_bins] * binw).sum()
-
-                fig = go.Figure()
-                if style.startswith("Lines"):
-                    ysm = gaussian_filter1d(y, sigma=smooth_bins) if smooth_bins>0 else y
-                    fig.add_trace(go.Scatter(x=centers, y=ysm, mode="lines", name=nm))
-                else:
-                    fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.7)
-                fig.add_vrect(x0=rmin, x1=rmax, fillcolor="LightSalmon", opacity=0.25, layer="below", line_width=0)
-                fig.update_layout(title=nm, xaxis_title="FRET efficiency, E",
-                                  yaxis_title=("Density (area=1)" if normalize else "Counts per bin"),
-                                  margin=dict(l=40,r=10,t=40,b=40), showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
-
-                rows.append({
-                    "file": nm, "bins": nb,
-                    "E_min": edges[0], "E_max": edges[-1],
-                    "region_min": rmin, "region_max": rmax,
-                    "AUC_in_region": auc, "normalized": normalize
-                })
-            df_auc = pd.DataFrame(rows)
-            st.subheader("AUC summary for selected region")
-            st.dataframe(df_auc, use_container_width=True)
-            st.download_button("Download AUC summary (CSV)", df_auc.to_csv(index=False).encode(), "auc_region_summary.csv", "text/csv")
+        if len(all_EOT
