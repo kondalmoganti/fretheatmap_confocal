@@ -539,26 +539,57 @@ with tabs[4]:
             st.plotly_chart(fig, use_container_width=True)
 
 # ---- Compare multiple files ----
+# ---- Compare multiple files ----
 with tabs[5]:
     st.subheader("Compare multiple files – overlay E histograms in a selected range")
-    files = st.file_uploader("Upload one or more .dat files", type=["dat","txt","csv"], accept_multiple_files=True, key="multi_uploader_best")
+    files = st.file_uploader(
+        "Upload one or more .dat files",
+        type=["dat","txt","csv"],
+        accept_multiple_files=True,
+        key="multi_uploader_best"
+    )
+
     if files:
-        source = st.radio("E source to compare", ["PIE", "Classical"], index=0, horizontal=True, key="multi_source_best")
+        source = st.radio(
+            "E source to compare",
+            ["PIE", "Classical"],
+            index=0,
+            horizontal=True,
+            key="multi_source_best"
+        )
         normalize = st.checkbox("Normalize each histogram area to 1", value=True, key="multi_norm_best")
-        bin_mode = st.radio("Binning", ["Auto (rule)","Manual"], index=0, horizontal=True, key="multi_binmode_best")
+
+        bin_mode = st.radio(
+            "Binning",
+            ["Auto (rule)","Manual"],
+            index=0,
+            horizontal=True,
+            key="multi_binmode_best"
+        )
+
         if bin_mode == "Auto (rule)":
-            rule = st.selectbox("Auto-binning rule (shared)", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="multi_rule_best")
+            rule = st.selectbox(
+                "Auto-binning rule (shared)",
+                ["Freedman–Diaconis","Scott","Sturges"],
+                index=0,
+                key="multi_rule_best"
+            )
             edges = None
         else:
             c1,c2,c3 = st.columns(3)
-            with c1: nb = st.number_input("Bins (manual, shared)", 5, 400, 80, 1, key="multi_bins_best")
-            with c2: xmin = st.number_input("E min (shared)", value=0.0, step=0.01, key="multi_xmin_best")
-            with c3: xmax = st.number_input("E max (shared)", value=1.0, step=0.01, key="multi_xmax_best")
-            if xmax <= xmin: xmax = xmin + 1e-6
+            with c1:
+                nb = st.number_input("Bins (manual, shared)", 5, 400, 80, 1, key="multi_bins_best")
+            with c2:
+                xmin = st.number_input("E min (shared)", value=0.0, step=0.01, key="multi_xmin_best")
+            with c3:
+                xmax = st.number_input("E max (shared)", value=1.0, step=0.01, key="multi_xmax_best")
+            if xmax <= xmin:
+                xmax = xmin + 1e-6
             edges = np.linspace(float(xmin), float(xmax), int(nb)+1)
 
         style = st.selectbox("Histogram style", ["Lines (smoothed)","Bars"], index=0, key="multi_style_best")
         smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="multi_smooth_best")
+
         region = st.slider("Analysis region (E-range)", 0.0, 1.0, (0.7, 1.0), 0.01, key="multi_region_best")
 
         all_E, all_W, names = [], [], []
@@ -568,16 +599,193 @@ with tabs[5]:
             cand = [i for i,(df,_,_,_) in enumerate(blks) if blks[i][0].shape[1] >= 8]
             if not cand:
                 continue
+
             df = blks[cand[0]][0].copy()
-            df.columns = ["Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE","E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"] + [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
+            df.columns = [
+                "Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE",
+                "E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"
+            ] + [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
+
             if source == "PIE":
                 E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
                 W = pd.to_numeric(df["Occur_E_PIE"], errors="coerce").to_numpy()
             else:
                 E = pd.to_numeric(df["E_Classical"], errors="coerce").to_numpy()
                 W = pd.to_numeric(df["Occur_E_Classical"], errors="coerce").to_numpy()
-            m = np.isfinite(E) & np.isfinite(W) & (W>=0)
+
+            m = np.isfinite(E) & np.isfinite(W) & (W >= 0)
             if np.any(m):
                 all_E.append(E[m]); all_W.append(W[m]); names.append(f.name)
 
-        if len(all_EOT
+        if len(all_E) == 0:
+            st.warning("No valid E data found across the uploaded files.")
+        else:
+            # Shared bins
+            if edges is None:
+                xmin = float(np.nanmin([np.nanmin(x) for x in all_E]))
+                xmax = float(np.nanmax([np.nanmax(x) for x in all_E]))
+                nb = auto_bins(np.concatenate(all_E), rule=rule)
+                edges = np.linspace(xmin, xmax, nb+1)
+
+            centers = 0.5*(edges[:-1] + edges[1:])
+            binw = np.diff(edges)[0]
+
+            fig = go.Figure()
+            summary = []
+
+            for E, W, nm in zip(all_E, all_W, names):
+                hist, _ = np.histogram(E, bins=edges, weights=W, density=False)
+                y = hist.astype(float)
+                total_area = (y * binw).sum()
+                if normalize and total_area > 0:
+                    y = y / total_area
+
+                if style.startswith("Lines"):
+                    yy = gaussian_filter1d(y, sigma=smooth_bins) if smooth_bins > 0 else y
+                    fig.add_trace(go.Scatter(x=centers, y=yy, mode="lines", name=nm))
+                else:
+                    fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.55)
+
+                rmin, rmax = region
+                mask_bins = (centers >= rmin) & (centers < rmax)
+                auc = (y[mask_bins] * binw).sum()
+                frac = auc if normalize else (auc / total_area if total_area > 0 else np.nan)
+                summary.append({
+                    "file": nm,
+                    "AUC_in_region": auc,
+                    "fraction_of_total": frac
+                })
+
+            fig.add_vrect(x0=region[0], x1=region[1], fillcolor="LightSalmon", opacity=0.2, layer="below", line_width=0)
+            fig.update_layout(
+                xaxis_title="FRET efficiency, E",
+                yaxis_title=("Density (area=1)" if normalize else "Counts"),
+                margin=dict(l=40, r=10, t=40, b=40)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            df_sum = pd.DataFrame(summary)
+            st.subheader("Population in selected region")
+            st.dataframe(df_sum, use_container_width=True)
+            st.download_button("Download AUC table (CSV)", df_sum.to_csv(index=False).encode(), "region_auc.csv", "text/csv")
+    else:
+        st.info("Upload multiple files to compare.")
+
+# ---- AUC Region Analyzer ----
+with tabs[6]:
+    st.subheader("AUC Region Analyzer – stacked histograms")
+    files = st.file_uploader(
+        "Upload one or more .dat files",
+        type=["dat","txt","csv"],
+        accept_multiple_files=True,
+        key="auc_uploader_best"
+    )
+
+    if not files:
+        st.info("Upload multiple files to start.")
+    else:
+        source = st.radio("E source", ["PIE", "Classical"], index=0, horizontal=True, key="auc_source_best")
+        normalize = st.checkbox("Normalize each histogram area to 1", value=True, key="auc_norm_best")
+
+        bin_mode = st.radio("Binning", ["Auto (rule)", "Manual (fixed)"], index=0, horizontal=True, key="auc_binmode_best")
+        if bin_mode == "Auto (rule)":
+            rule = st.selectbox("Auto-binning rule (shared)", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="auc_rule_best")
+            manual_bins = None; xmin_manual = None; xmax_manual = None
+        else:
+            c1,c2,c3 = st.columns(3)
+            with c1:
+                manual_bins = st.number_input("Number of bins (shared)", min_value=5, max_value=400, value=80, step=1, key="auc_bins_n_best")
+            with c2:
+                xmin_manual   = st.number_input("Range min (E)", value=0.0, min_value=-1.0, max_value=2.0, step=0.01, key="auc_bins_min_best")
+            with c3:
+                xmax_manual   = st.number_input("Range max (E)", value=1.0, min_value=-1.0, max_value=2.0, step=0.01, key="auc_bins_max_best")
+
+        region = st.slider("AUC region (E-range)", 0.0, 1.0, (0.70, 1.00), 0.01, key="auc_region_best")
+        style = st.selectbox("Histogram style", ["Lines (smoothed)", "Bars"], index=0, key="auc_style_best")
+        smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="auc_smooth_best")
+
+        datasets = []
+        for f in files:
+            raw2 = f.getvalue().decode("utf-8", errors="ignore")
+            blks = split_numeric_blocks_with_headers(raw2)
+            cand = [i for i,(df,_,_,_) in enumerate(blks) if blks[i][0].shape[1] >= 8]
+            if not cand:
+                continue
+            df = blks[cand[0]][0].copy()
+            df.columns = [
+                "Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE",
+                "E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE"
+            ] + [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
+
+            if source == "PIE":
+                E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
+                W = pd.to_numeric(df["Occur_E_PIE"], errors="coerce").to_numpy()
+            else:
+                E = pd.to_numeric(df["E_Classical"], errors="coerce").to_numpy()
+                W = pd.to_numeric(df["Occur_E_Classical"], errors="coerce").to_numpy()
+
+            m = np.isfinite(E) & np.isfinite(W) & (W >= 0)
+            if np.any(m):
+                datasets.append((f.name, E[m], W[m]))
+
+        if not datasets:
+            st.warning("No valid 8-column blocks found across the files.")
+        else:
+            # Build shared bins
+            if bin_mode == "Auto (rule)":
+                all_E = np.concatenate([E for _, E, _ in datasets])
+                xmin = float(np.nanmin(all_E)); xmax = float(np.nanmax(all_E))
+                nb = auto_bins(all_E, rule=rule)
+                edges = np.linspace(xmin, xmax, nb+1)
+            else:
+                xmin = float(xmin_manual); xmax = float(xmax_manual); nb = int(manual_bins)
+                if xmax <= xmin:
+                    xmax = xmin + 1e-6
+                edges = np.linspace(xmin, xmax, nb+1)
+
+            centers = 0.5*(edges[:-1]+edges[1:])
+            binw = np.diff(edges)[0]
+
+            rows = []
+            for nm, E, W in datasets:
+                hist, _ = np.histogram(E, bins=edges, weights=W, density=False)
+                y = hist.astype(float)
+                area_total = (y * binw).sum()
+                if normalize and area_total > 0:
+                    y = y / area_total
+
+                fig = go.Figure()
+                if style.startswith("Lines"):
+                    ysm = gaussian_filter1d(y, sigma=smooth_bins) if smooth_bins > 0 else y
+                    fig.add_trace(go.Scatter(x=centers, y=ysm, mode="lines", name=nm))
+                else:
+                    fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.7)
+
+                fig.add_vrect(x0=region[0], x1=region[1], fillcolor="LightSalmon", opacity=0.25, layer="below", line_width=0)
+                fig.update_layout(
+                    title=nm,
+                    xaxis_title="FRET efficiency, E",
+                    yaxis_title=("Density (area=1)" if normalize else "Counts per bin"),
+                    margin=dict(l=40, r=10, t=40, b=40),
+                    showlegend=False
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                rmin, rmax = region
+                mask_bins = (centers >= rmin) & (centers < rmax)
+                auc = (y[mask_bins] * binw).sum()
+                rows.append({
+                    "file": nm,
+                    "bins": nb,
+                    "E_min": edges[0],
+                    "E_max": edges[-1],
+                    "region_min": rmin,
+                    "region_max": rmax,
+                    "AUC_in_region": auc,
+                    "normalized": normalize
+                })
+
+            df_auc = pd.DataFrame(rows)
+            st.subheader("AUC summary for selected region")
+            st.dataframe(df_auc, use_container_width=True)
+            st.download_button("Download AUC summary (CSV)", df_auc.to_csv(index=False).encode(), "auc_region_summary.csv", "text/csv")
