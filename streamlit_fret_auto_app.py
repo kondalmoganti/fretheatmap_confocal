@@ -659,13 +659,14 @@ with tabs[2]:
             st.plotly_chart(fig, use_container_width=True, key="fig_overlay")
 
 # -------------------------
+# -------------------------
 # TAB 4: Joint view
 # -------------------------
 with tabs[3]:
     st.subheader("Joint view: S–E heatmap + S/E histograms (from 8-col table)")
     colorscale = st.selectbox("Heatmap colorscale", colorscales, index=0, key="joint_cmap_best")
     mats = [i for i, (df, _, _, _) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
-    t8 = [i for i, (df, _, _, _) in enumerate(blocks) if df.shape[1] >= 8]
+    t8   = [i for i, (df, _, _, _) in enumerate(blocks) if df.shape[1] >= 8]
     if not mats or not t8:
         st.info("Need a matrix block and an 8-column block in the file.")
     else:
@@ -690,162 +691,126 @@ with tabs[3]:
             style = st.selectbox("Histogram style", ["Bars", "Lines (smoothed)"], key="joint_style_best")
             smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="joint_smooth_lines_best")
 
+        # Allow compact height (prevents stretched look)
+        fig_height = st.slider("Figure height (px)", 320, 900, 420, 10, key="joint_fig_height")
+
+        # Heatmap matrix and default grid
         M = blocks[iM][0].astype(float).replace([np.inf, -np.inf], np.nan).to_numpy()
         Mplot = (
             gaussian_filter1d(gaussian_filter1d(M, sigma=smooth, axis=0), sigma=smooth, axis=1)
-            if smooth > 0
-            else M.copy()
+            if smooth > 0 else M.copy()
         )
-        ny, nx = Mplot.shape
-        e_edges_hm = np.linspace(0, 1, nx + 1)
-        e_centers_hm = 0.5 * (e_edges_hm[:-1] + e_edges_hm[1:])
-        s_edges_hm = np.linspace(0, 1, ny + 1)
-        s_centers_hm = 0.5 * (s_edges_hm[:-1] + s_edges_hm[1:])
+        ny, nx = Mplot.shape  # rows=S, cols=E
 
+        # default uniform edges & centers for the heatmap grid
+        e_edges_hm = np.linspace(0, 1, nx + 1); e_centers_hm = 0.5 * (e_edges_hm[:-1] + e_edges_hm[1:])
+        s_edges_hm = np.linspace(0, 1, ny + 1); s_centers_hm = 0.5 * (s_edges_hm[:-1] + s_edges_hm[1:])
+
+        # 8-col table (S/E)
         tbl = blocks[iT][0].copy()
         base = [
-            "Occur._S_Classical",
-            "S_Classical",
-            "Occur._S_PIE",
-            "S_PIE",
-            "E_Classical",
-            "Occur._E_Classical",
-            "E_PIE",
-            "Occur._E_PIE",
+            "Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
+            "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE",
         ]
         extra = [f"Extra_{i}" for i in range(max(0, tbl.shape[1] - 8))]
         tbl.columns = base + extra
 
-        def col(name):
-            return pd.to_numeric(tbl[name], errors="coerce").to_numpy()
+        def col(name): return pd.to_numeric(tbl[name], errors="coerce").to_numpy()
+        S_cl, W_S_cl, S_pie, W_S_pie = col("S_Classical"), col("Occur._S_Classical"), col("S_PIE"), col("Occur._S_PIE")
+        E_cl, W_E_cl, E_pie, W_E_pie = col("E_Classical"), col("Occur._E_Classical"), col("E_PIE"), col("Occur._E_PIE")
 
-        S_cl, W_S_cl, S_pie, W_S_pie = col("S_Classical"), col("Occur._S_Classical"), col("S_PIE"), col(
-            "Occur._S_PIE"
-        )
-        E_cl, W_E_cl, E_pie, W_E_pie = col("E_Classical"), col("Occur._E_Classical"), col("E_PIE"), col(
-            "Occur._E_PIE"
-        )
-
+        # --- robust edges helpers ---
         def hist1(x, w, edges):
             m = np.isfinite(x) & np.isfinite(w) & (w >= 0)
             h, _ = np.histogram(x[m], bins=edges, weights=w[m])
             return h
-        
+
         def _edges_from_centers_or_edges(arr, nbins=None, rng=(0.0, 1.0)):
             """Return valid, strictly increasing histogram *edges*."""
             if arr is None:
                 nb = max(2, int(nbins) if nbins else 40)
                 return np.linspace(float(rng[0]), float(rng[1]), nb + 1)
-        
             a = np.asarray(arr)
             if a.ndim != 1 or a.size < 2:
                 nb = max(2, int(nbins) if nbins else 40)
                 return np.linspace(float(rng[0]), float(rng[1]), nb + 1)
-        
-            # If strictly increasing and looks like edges already
-            if np.all(np.diff(a) > 0):
+            if np.all(np.diff(a) > 0):  # looks like edges already
                 return a
-        
-            # If we have ≥3 points, treat as centers → build edges
-            if a.size >= 3:
+            if a.size >= 3:  # centers -> edges
                 d = np.diff(a)
-                inner = a[:-1] + d / 2.0
-                first = a[0] - d[0] / 2.0
-                last  = a[-1] + d[-1] / 2.0
+                inner = a[:-1] + d/2.0
+                first = a[0] - d[0]/2.0
+                last  = a[-1] + d[-1]/2.0
                 edges = np.r_[first, inner, last]
-            else:
-                # 2 points: assume they are limits
+            else:  # 2 points -> make a tiny 2-bin set
                 edges = np.linspace(a.min(), a.max(), 3)
-        
-            # Enforce increasing order
             if edges[-1] < edges[0]:
                 edges = edges[::-1]
             return edges
-        
+
+        # --- choose binning for histograms ---
         if match_bins:
-            # Use the heatmap grid resolution as a fallback if needed
-            try:
-                nE = matrix_hm.shape[1]   # <-- use your heatmap matrix variable name
-                nS = matrix_hm.shape[0]
-            except NameError:
-                # fallback if the name differs
-                try:
-                    nE = Z.shape[1]; nS = Z.shape[0]
-                except Exception:
-                    nE, nS = 40, 40
-        
-            # Build proper *edges* from whatever the heatmap gave (edges or centers)
-            e_edges = _edges_from_centers_or_edges(e_edges_hm, nbins=nE, rng=(0.0, 1.0))
-            s_edges = _edges_from_centers_or_edges(s_edges_hm, nbins=nS, rng=(0.0, 1.0))
-        
-            # Final safety: strictly increasing, ≥2 edges
+            # Build proper *edges* from heatmap resolution
+            e_edges = _edges_from_centers_or_edges(e_edges_hm, nbins=nx, rng=(0.0, 1.0))
+            s_edges = _edges_from_centers_or_edges(s_edges_hm, nbins=ny, rng=(0.0, 1.0))
             if (len(e_edges) < 2) or (len(s_edges) < 2):
-                st.warning("Heatmap grid too small to match histogram bins; falling back to auto bins.")
+                st.warning("Heatmap grid too small to match histogram bins; using auto bins instead.")
                 match_bins = False
             else:
-                # centers to plot the curves/bars
                 e_x = 0.5 * (e_edges[:-1] + e_edges[1:])
                 s_y = 0.5 * (s_edges[:-1] + s_edges[1:])
-        else:
-            bin_mode = st.radio(
-                "Histogram binning (for S/E)", ["Auto (rule)", "Manual"], index=0, key="joint_binmode_best"
-            )
+        if not match_bins:
+            bin_mode = st.radio("Histogram binning (for S/E)", ["Auto (rule)", "Manual"], index=0, key="joint_binmode_best")
             if bin_mode == "Auto (rule)":
                 nb_e = auto_bins(np.concatenate([E_cl, E_pie]))
                 nb_s = auto_bins(np.concatenate([S_cl, S_pie]))
                 e_edges = np.linspace(0, 1, nb_e + 1)
                 s_edges = np.linspace(0, 1, nb_s + 1)
             else:
-                e_edges, _ = clamp_manual_bins_E(
-                    "E min", "E max", "E bins (manual)", default_bins=80, key_prefix="joint_E"
-                )
-                s_edges, _ = clamp_manual_bins_E(
-                    "S min", "S max", "S bins (manual)", default_bins=80, key_prefix="joint_S"
-                )
+                e_edges, _ = clamp_manual_bins_E("E min", "E max", "E bins (manual)", default_bins=80, key_prefix="joint_E")
+                s_edges, _ = clamp_manual_bins_E("S min", "S max", "S bins (manual)", default_bins=80, key_prefix="joint_S")
             e_x = 0.5 * (e_edges[:-1] + e_edges[1:])
             s_y = 0.5 * (s_edges[:-1] + s_edges[1:])
 
+        # histograms (Counts; you can normalize if you’d like)
         e_hist_cl = hist1(E_cl, W_E_cl, e_edges)
         e_hist_pie = hist1(E_pie, W_E_pie, e_edges)
         s_hist_cl = hist1(S_cl, W_S_cl, s_edges)
         s_hist_pie = hist1(S_pie, W_S_pie, s_edges)
 
+        # --- figure layout (more compact) ---
         figj = make_subplots(
-            rows=2,
-            cols=2,
+            rows=2, cols=2,
             specs=[[{"type": "xy"}, {"type": "xy"}], [{"type": "heatmap"}, {"type": "xy"}]],
-            column_widths=[0.8, 0.2],
-            row_heights=[0.25, 0.75],
-            horizontal_spacing=0.02,
-            vertical_spacing=0.02,
+            column_widths=[0.72, 0.28],    # narrower right panel
+            row_heights=[0.22, 0.78],      # shorter top histogram
+            horizontal_spacing=0.03,
+            vertical_spacing=0.03,
         )
 
         def add_hist_top(xc, yc, name):
             if style == "Bars":
-                figj.add_trace(go.Bar(x=xc, y=yc, name=name, opacity=0.6), row=1, col=1)
+                figj.add_trace(go.Bar(x=xc, y=yc, name=name, opacity=0.6, width=np.diff(e_edges)), row=1, col=1)
             else:
                 ysm = gaussian_filter1d(yc, sigma=smooth_bins) if smooth_bins > 0 else yc
                 figj.add_trace(go.Scatter(x=xc, y=ysm, mode="lines", name=name), row=1, col=1)
 
-        if which in ("Classical", "Both"):
-            add_hist_top(e_x, e_hist_cl, "Classical E")
-        if which in ("PIE", "Both"):
-            add_hist_top(e_x, e_hist_pie, "PIE E")
+        if which in ("Classical", "Both"): add_hist_top(e_x, e_hist_cl, "Classical E")
+        if which in ("PIE", "Both"):       add_hist_top(e_x, e_hist_pie, "PIE E")
 
         figj.add_trace(go.Heatmap(z=Mplot, coloraxis="coloraxis", showscale=True), row=2, col=1)
 
         def add_hist_right(yc, xc, name):
             if style == "Bars":
-                figj.add_trace(go.Bar(y=yc, x=xc, orientation="h", name=name, opacity=0.6), row=2, col=2)
+                figj.add_trace(go.Bar(y=yc, x=xc, orientation="h", name=name, opacity=0.6, width=np.diff(s_edges)), row=2, col=2)
             else:
                 xsm = gaussian_filter1d(xc, sigma=smooth_bins) if smooth_bins > 0 else xc
                 figj.add_trace(go.Scatter(y=yc, x=xsm, mode="lines", name=name), row=2, col=2)
 
-        if which in ("Classical", "Both"):
-            add_hist_right(s_y, s_hist_cl, "Classical S")
-        if which in ("PIE", "Both"):
-            add_hist_right(s_y, s_hist_pie, "PIE S")
+        if which in ("Classical", "Both"): add_hist_right(s_y, s_hist_cl, "Classical S")
+        if which in ("PIE", "Both"):       add_hist_right(s_y, s_hist_pie, "PIE S")
 
+        # link axes when matching grid
         if match_bins:
             figj.update_xaxes(matches="x", row=1, col=1)
             figj.update_yaxes(matches="y", row=2, col=2)
@@ -854,12 +819,15 @@ with tabs[3]:
         figj.update_yaxes(title_text="S (0–1)", row=2, col=1)
         figj.update_yaxes(title_text="S (0–1)", row=2, col=2)
         figj.update_xaxes(title_text="Counts (E)", row=1, col=1)
+
         figj.update_layout(
             coloraxis=dict(colorscale=colorscale),
             showlegend=True,
             bargap=0,
             margin=dict(l=40, r=10, t=40, b=40),
+            height=fig_height,     # <- compact figure
         )
+
         st.plotly_chart(figj, use_container_width=True, key="fig_joint_view")
 
 # -------------------------
