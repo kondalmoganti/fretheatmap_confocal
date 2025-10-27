@@ -311,7 +311,7 @@ tabs = st.tabs(
         "Joint (Heatmap + Marginals)",
         "FRET Analysis",
         "AUC Region Analyzer",
-        "FRET ↔ Distance Calculator"
+        "FRET"
     ]
 )
 
