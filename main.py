@@ -311,6 +311,7 @@ tabs = st.tabs(
         "Joint (Heatmap + Marginals)",
         "FRET Analysis",
         "AUC Region Analyzer",
+        "FRET ↔ Distance Calculator"
     ]
 )
 
@@ -752,3 +753,154 @@ with tabs[2]:
                 "text/csv",
                 key="dl_auc_summary",
             )
+# -------------------------
+# TAB: FRET Analysis — E ↔ r calculator
+# -------------------------
+with tabs[3]:
+    st.subheader("FRET ↔ Distance Calculator")
+
+    colA, colB = st.columns([1, 1])
+    with colA:
+        direction = st.radio("Conversion", ["E → r (nm)", "r (nm) → E"], index=0, horizontal=True, key="fr_dir")
+        R0 = st.number_input("Förster radius R₀ (nm)", min_value=0.1, max_value=20.0, value=6.4, step=0.1, key="fr_R0")
+        st.caption("Tip: For this lab, use R₀ ≈ 6.4 nm (given in the protocol).")
+
+    with colB:
+        show_plot = st.checkbox("Show quick plot", value=True, key="fr_plot")
+
+    st.markdown("**Input** (single value, list, or CSV):")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        txt = st.text_area(
+            "Paste values",
+            value="0.2, 0.4, 0.65, 0.85" if direction.startswith("E") else "3.5 5.0 6.4 8.0",
+            height=100,
+            key="fr_text"
+        )
+    with col2:
+        up = st.file_uploader(
+            "Or upload CSV",
+            type=["csv"],
+            key="fr_csv"
+        )
+        help_col = "E" if direction.startswith("E") else "r"
+        st.caption(f"If you upload CSV, include a column named **{help_col}**.")
+
+    import io, numpy as np, pandas as pd
+
+    def _parse_numbers(s: str):
+        if not s.strip():
+            return np.array([])
+        # split on commas, whitespace, semicolons
+        parts = [p for p in re.split(r"[,\s;]+", s.strip()) if p]
+        vals = []
+        for p in parts:
+            try:
+                vals.append(float(p))
+            except Exception:
+                vals.append(np.nan)
+        return np.array(vals, dtype=float)
+
+    import re
+
+    # Load inputs
+    arr = np.array([], dtype=float)
+    src = "text"
+    if up is not None:
+        try:
+            df_in = pd.read_csv(up)
+            if direction.startswith("E"):
+                if "E" in df_in.columns:
+                    arr = pd.to_numeric(df_in["E"], errors="coerce").to_numpy()
+                    src = "csv"
+                else:
+                    st.error("CSV must contain a column named 'E'.")
+            else:
+                if "r" in df_in.columns:
+                    arr = pd.to_numeric(df_in["r"], errors="coerce").to_numpy()
+                    src = "csv"
+                else:
+                    st.error("CSV must contain a column named 'r'.")
+        except Exception as e:
+            st.error(f"Failed to read CSV: {e}")
+    else:
+        arr = _parse_numbers(txt)
+
+    # Conversion functions
+    def fret_to_distance(E, R0):
+        E = np.asarray(E, dtype=float)
+        r = np.full_like(E, np.nan)
+        mask = (E > 0.0) & (E < 1.0) & np.isfinite(E)
+        r[mask] = R0 * ((1.0 / E[mask] - 1.0) ** (1.0 / 6.0))
+        return r
+
+    def distance_to_fret(r, R0):
+        r = np.asarray(r, dtype=float)
+        E = np.full_like(r, np.nan)
+        mask = (r > 0.0) & np.isfinite(r) & (R0 > 0.0)
+        E[mask] = 1.0 / (1.0 + (r[mask] / R0) ** 6)
+        return E
+
+    # Do conversion
+    if direction.startswith("E"):
+        E = arr
+        r = fret_to_distance(E, R0)
+        df_out = pd.DataFrame({"E": E, "r_nm": r})
+        valid = np.isfinite(r).sum()
+        total = len(r)
+        st.write(f"Converted **{valid}/{total}** values (E must be in (0,1)).")
+    else:
+        r = arr
+        E = distance_to_fret(r, R0)
+        df_out = pd.DataFrame({"r_nm": r, "E": E})
+        valid = np.isfinite(E).sum()
+        total = len(E)
+        st.write(f"Converted **{valid}/{total}** values (r must be > 0).")
+
+    # Show table
+    st.dataframe(df_out, use_container_width=True, height=240)
+
+    # Download
+    st.download_button(
+        "Download results (CSV)",
+        df_out.to_csv(index=False).encode(),
+        file_name="fret_distance_conversion.csv",
+        mime="text/csv",
+        key="fr_dl"
+    )
+
+    # Quick plot
+    if show_plot:
+        import plotly.graph_objects as go
+        import numpy as np
+
+        if direction.startswith("E"):
+            xs = np.linspace(0.001, 0.999, 400)
+            ys = fret_to_distance(xs, R0)
+            fig = go.Figure()
+            fig.add_scatter(x=xs, y=ys, mode="lines", name="r(E)")
+            # mark input points
+            if len(arr) > 0:
+                fig.add_scatter(x=E, y=r, mode="markers", name="Your points")
+            fig.update_layout(
+                xaxis_title="FRET efficiency E",
+                yaxis_title="Distance r (nm)",
+                height=360, margin=dict(l=40, r=20, t=20, b=40)
+            )
+            st.plotly_chart(fig, use_container_width=True, key="fr_plot1")
+        else:
+            xs = np.linspace(max(0.1, R0*0.2), R0*3.0, 400)
+            ys = distance_to_fret(xs, R0)
+            fig = go.Figure()
+            fig.add_scatter(x=xs, y=ys, mode="lines", name="E(r)")
+            if len(arr) > 0:
+                fig.add_scatter(x=r, y=E, mode="markers", name="Your points")
+            fig.update_layout(
+                xaxis_title="Distance r (nm)",
+                yaxis_title="FRET efficiency E",
+                height=360, margin=dict(l=40, r=20, t=20, b=40)
+            )
+            st.plotly_chart(fig, use_container_width=True, key="fr_plot2")
+
+    st.caption("Formulas:  r = R₀ · (1/E − 1)^(1/6)  and  E = 1 / (1 + (r/R₀)^6)")
