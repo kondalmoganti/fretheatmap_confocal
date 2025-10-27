@@ -731,39 +731,62 @@ with tabs[3]:
             h, _ = np.histogram(x[m], bins=edges, weights=w[m])
             return h
         
+        def _edges_from_centers_or_edges(arr, nbins=None, rng=(0.0, 1.0)):
+            """Return valid, strictly increasing histogram *edges*."""
+            if arr is None:
+                nb = max(2, int(nbins) if nbins else 40)
+                return np.linspace(float(rng[0]), float(rng[1]), nb + 1)
+        
+            a = np.asarray(arr)
+            if a.ndim != 1 or a.size < 2:
+                nb = max(2, int(nbins) if nbins else 40)
+                return np.linspace(float(rng[0]), float(rng[1]), nb + 1)
+        
+            # If strictly increasing and looks like edges already
+            if np.all(np.diff(a) > 0):
+                return a
+        
+            # If we have ≥3 points, treat as centers → build edges
+            if a.size >= 3:
+                d = np.diff(a)
+                inner = a[:-1] + d / 2.0
+                first = a[0] - d[0] / 2.0
+                last  = a[-1] + d[-1] / 2.0
+                edges = np.r_[first, inner, last]
+            else:
+                # 2 points: assume they are limits
+                edges = np.linspace(a.min(), a.max(), 3)
+        
+            # Enforce increasing order
+            if edges[-1] < edges[0]:
+                edges = edges[::-1]
+            return edges
+        
         if match_bins:
-            # e_edges_hm / s_edges_hm might actually be centers or even just grid sizes.
-            # Convert safely to *edges*; if unavailable, derive from heatmap shape.
-            # Expect you already have Z.shape == (nS, nE)
+            # Use the heatmap grid resolution as a fallback if needed
             try:
-                nE = Z.shape[1]
-                nS = Z.shape[0]
+                nE = matrix_hm.shape[1]   # <-- use your heatmap matrix variable name
+                nS = matrix_hm.shape[0]
             except NameError:
-                # fallback: try other known names
-                if "matrix_hm" in locals():
-                    nE = matrix_hm.shape[1]
-                    nS = matrix_hm.shape[0]
-                else:
-                    # ultimate fallback
+                # fallback if the name differs
+                try:
+                    nE = Z.shape[1]; nS = Z.shape[0]
+                except Exception:
                     nE, nS = 40, 40
-
-            #nE = Z.shape[1]
-            #nS = Z.shape[0]
         
-            # Try to build from provided arrays; otherwise from uniform grid [0,1]
-            e_edges = _ensure_edges_from_grid(e_edges_hm, nbins=nE, rng=(0.0, 1.0))
-            s_edges = _ensure_edges_from_grid(s_edges_hm, nbins=nS, rng=(0.0, 1.0))
+            # Build proper *edges* from whatever the heatmap gave (edges or centers)
+            e_edges = _edges_from_centers_or_edges(e_edges_hm, nbins=nE, rng=(0.0, 1.0))
+            s_edges = _edges_from_centers_or_edges(s_edges_hm, nbins=nS, rng=(0.0, 1.0))
         
-            # Centers for plotting the lines/bars on top
-            e_x = 0.5 * (e_edges[:-1] + e_edges[1:])
-            s_y = 0.5 * (s_edges[:-1] + s_edges[1:])
-        
-            # Guard: need at least 2 edges for each axis
+            # Final safety: strictly increasing, ≥2 edges
             if (len(e_edges) < 2) or (len(s_edges) < 2):
                 st.warning("Heatmap grid too small to match histogram bins; falling back to auto bins.")
-                match_bins = False  # fall through to auto/manual below
-        
-        if not match_bins:
+                match_bins = False
+            else:
+                # centers to plot the curves/bars
+                e_x = 0.5 * (e_edges[:-1] + e_edges[1:])
+                s_y = 0.5 * (s_edges[:-1] + s_edges[1:])
+        else:
             bin_mode = st.radio(
                 "Histogram binning (for S/E)", ["Auto (rule)", "Manual"], index=0, key="joint_binmode_best"
             )
@@ -779,7 +802,6 @@ with tabs[3]:
                 s_edges, _ = clamp_manual_bins_E(
                     "S min", "S max", "S bins (manual)", default_bins=80, key_prefix="joint_S"
                 )
-        
             e_x = 0.5 * (e_edges[:-1] + e_edges[1:])
             s_y = 0.5 * (s_edges[:-1] + s_edges[1:])
 
