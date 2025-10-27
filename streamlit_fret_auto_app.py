@@ -321,7 +321,7 @@ tabs = st.tabs(
 # -------------------------
 # TAB 1: Heatmap
 # -------------------------
-with tabs[0]:
+with tabs[3]:
     st.subheader("Correlogram Heatmap")
     mats = [i for i, (df, _, _, _) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
     if not mats:
@@ -364,7 +364,7 @@ with tabs[0]:
 # -------------------------
 # TAB 2: Histogram (single)
 # -------------------------
-with tabs[1]:
+with tabs[4]:
     st.subheader("Histogram + Best Auto-fit (single dataset)")
     tbls = list(range(len(blocks)))
     if not tbls:
@@ -493,7 +493,7 @@ with tabs[1]:
 # -------------------------
 # TAB 3: Overlay
 # -------------------------
-with tabs[2]:
+with tabs[5]:
     st.subheader("Overlay: Classical vs PIE (S or E) + Best Auto-fit per curve")
     cand = [i for i, (df, _, _, _) in enumerate(blocks) if df.shape[1] >= 8]
     if not cand:
@@ -662,7 +662,7 @@ with tabs[2]:
 # -------------------------
 # TAB 4: Joint view
 # -------------------------
-with tabs[3]:
+with tabs[0]:
     st.subheader("Joint view: S–E heatmap + S/E histograms (from 8-col table)")
     colorscale = st.selectbox("Heatmap colorscale", colorscales, index=0, key="joint_cmap_best")
     mats = [i for i, (df, _, _, _) in enumerate(blocks) if df.shape[0] >= 10 and df.shape[1] >= 10]
@@ -833,7 +833,7 @@ with tabs[3]:
 # -------------------------
 # TAB 5: FRET Analysis (E only)
 # -------------------------
-with tabs[4]:
+with tabs[1]:
     st.subheader("FRET – Histogram + Best Auto-fit (PIE or Classical, E only)")
     candidates = [i for i, (df, _, _, _) in enumerate(blocks) if blocks[i][0].shape[1] >= 8]
     if not candidates:
@@ -951,7 +951,7 @@ with tabs[4]:
 # -------------------------
 # TAB 6: Compare multiple files (E)
 # -------------------------
-with tabs[5]:
+with tabs[6]:
     st.subheader("Compare multiple files – overlay E histograms in a selected range")
     files = st.file_uploader(
         "Upload one or more .dat files",
@@ -1073,7 +1073,7 @@ with tabs[5]:
 # -------------------------
 # TAB 7: AUC Region Analyzer
 # -------------------------
-with tabs[6]:
+with tabs[2]:
     st.subheader("AUC Region Analyzer – stacked histograms (bars only)")
 
     files = st.file_uploader(
