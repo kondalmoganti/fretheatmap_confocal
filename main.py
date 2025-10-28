@@ -861,6 +861,7 @@ with tabs[3]:
     st.caption("Formulas:  r = R₀ · (1/E − 1)^(1/6)  and  E = 1 / (1 + (r/R₀)^6)")
 
 # -------------------------
+# -------------------------
 # TAB: Population ratio (a/b) analysis — general titration
 # -------------------------
 with tabs[4]:
@@ -884,7 +885,7 @@ with tabs[4]:
 
     bin_mode = st.radio("Binning for E", ["Auto (rule)", "Manual"], index=0, horizontal=True, key="ratio_binmode")
     if bin_mode == "Auto (rule)":
-        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="ratio_rule")
+        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis", "Scott", "Sturges"], index=0, key="ratio_rule")
         user_edges = None
     else:
         user_edges, _ = clamp_manual_bins_E("E min", "E max", "Bins", default_bins=80, key_prefix="ratio_bins")
@@ -892,91 +893,149 @@ with tabs[4]:
     closed_region = st.slider("Closed-peak fit region (E-range)", 0.0, 1.0, (0.70, 1.00), 0.01, key="ratio_region")
     show_fit_plots = st.checkbox("Show PIE histogram + Gaussian fit for each file", value=True, key="ratio_showfits")
 
-    # --- helpers ---
-    def parse_condition_value(name: str):
-        """Extract first floating-point number from filename."""
-        m = re.search(r"([0-9]*\.?[0-9]+)", name)
-        return float(m.group(1)) if m else np.nan
+    # ---------- NEW: robust auto-parse + editable 'condition' table ----------
+    import re as _re
 
+    def parse_condition_from_name(name: str) -> float | None:
+        """
+        Try to extract a concentration-like value from the filename and return it in M (mol/L).
+        Handles '..._0M', '1.5M_...', '..._750mM', '..._250uM'/'µM', etc.
+        If we find multiple numbers, prefer the one closest to substring 'gdmcl' (if present),
+        otherwise take the last number in the string.
+        """
+        s = name.replace(",", ".").lower()
+        hits = []
+        for m in _re.finditer(r'(\d+(?:\.\d+)?)\s*([munp]?m)?', s):
+            val = float(m.group(1))
+            unit = (m.group(2) or "m").lower()
+            # normalize some common variants
+            unit = unit.replace("µ", "u")
+            factor = {
+                "m": 1.0,   # interpret bare number as 'M' (matches many of your files like "0M", "1.5M")
+                "mm": 1e-3,
+                "um": 1e-6,
+                "nm": 1e-9,
+            }.get(unit, 1.0)
+            hits.append((m.start(), val * factor))
+
+        if not hits:
+            return None
+
+        tag = s.find("gdmcl")  # if present, use the number closest to 'gdmcl'
+        if tag != -1:
+            idx = min(range(len(hits)), key=lambda i: abs(hits[i][0] - tag))
+            return hits[idx][1]
+        # otherwise, take the last number (often the suffix)
+        return hits[-1][1]
+
+    # Build initial table and let user edit/confirm (in M)
+    cfg_rows = [{"file": f.name, "condition": parse_condition_from_name(f.name)} for f in files]
+    df_cfg = pd.DataFrame(cfg_rows)
+    st.write("**Edit or confirm the condition values (in molar, M):**")
+    df_cfg_edit = st.data_editor(
+        df_cfg,
+        key="ratio_cfg_editor",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "condition": st.column_config.NumberColumn(
+                "Condition (M)", min_value=0.0, step=0.01, format="%.6f"
+            )
+        },
+    )
+    # ------------------------------------------------------------------------
+
+    # --- helpers for E/W extraction and PIE-closed fit ---
     def read_E_and_W_from_8col(df, use_pie: bool):
         df = df.copy()
         df.columns = [
-            "Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE",
-            "E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE",
-        ] + [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
+            "Occur_S_Classical", "S_Classical", "Occur_S_PIE", "S_PIE",
+            "E_Classical", "Occur_E_Classical", "E_PIE", "Occur_E_PIE",
+        ] + [f"Extra_{i}" for i in range(max(0, df.shape[1] - 8))]
+
         if use_pie:
             E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
             W = pd.to_numeric(df["Occur_E_PIE"], errors="coerce").to_numpy()
         else:
             E = pd.to_numeric(df["E_Classical"], errors="coerce").to_numpy()
             W = pd.to_numeric(df["Occur_E_Classical"], errors="coerce").to_numpy()
+
         m = np.isfinite(E) & np.isfinite(W) & (W >= 0)
         return E[m], W[m]
 
     def fit_closed_peak_area_PIE(E, W, edges, fit_range):
-        """Return 'a' (counts) by fitting a Gaussian to the PIE histogram within fit_range."""
+        """
+        Fit a 1-Gaussian to the PIE histogram restricted to fit_range (high-E window)
+        and return 'a' as the area (counts) under that Gaussian.
+        """
         counts, _ = np.histogram(E, bins=edges, weights=W, density=False)
         bw = np.diff(edges)[0]
         x = 0.5 * (edges[:-1] + edges[1:])
-        y = counts / bw  # counts per E unit
+        y = counts / bw  # convert to counts per E unit for fitting
+
         rmin, rmax = fit_range
         m = (x >= rmin) & (x <= rmax) & np.isfinite(y)
         if m.sum() < 5 or y[m].max() <= 0:
             return np.nan, (x, y), None
+
         xs, ys = x[m], y[m]
         y0_0 = max(1e-6, np.percentile(ys, 10))
         mu_0 = xs[np.argmax(ys)]
         sigma_0 = max(0.5 * bw, (np.percentile(xs, 75) - np.percentile(xs, 25)) / 1.349)
         A_0 = float(np.trapz(np.maximum(ys - y0_0, 0), xs))
+
         xmin, xmax = xs.min(), xs.max()
         sig_min = max(0.25 * bw, 1e-4)
         sig_max = max(0.5, (xmax - xmin))
         lower = [0.0, xmin, sig_min, 0.0]
         upper = [ys.max() * 2 + 5.0, xmax, sig_max, np.inf]
+
         try:
-            popt, _ = curve_fit(gaussian, xs, ys, p0=[y0_0, mu_0, sigma_0, max(A_0,1e-6)],
-                                bounds=(lower, upper), maxfev=100000)
-            return float(popt[3]), (x, y), popt  # A is area
+            popt, _ = curve_fit(
+                gaussian, xs, ys,
+                p0=[y0_0, mu_0, sigma_0, max(A_0, 1e-6)],
+                bounds=(lower, upper), maxfev=100000
+            )
+            return float(popt[3]), (x, y), popt  # A is the area in counts (after scaling back by bin width if needed)
         except Exception:
             return np.nan, (x, y), None
 
-        # Explanation / guide for users
+    # Explanation panel (kept)
     with st.expander("ℹ️ What do a, b, a/b, and normalized fraction mean?"):
         st.markdown("""
         **a** → *Area of the high-FRET (closed-state) population*  
-        • Calculated by fitting a Gaussian to the **PIE FRET** histogram within the selected high-E region  
-        • Represents the number of molecules in the **closed conformation**
+        • From a Gaussian fit to the **PIE FRET** histogram within the selected high-E window.
 
         **b** → *Total area under the classical FRET histogram*  
-        • Sum of all counts (both open + closed states)  
-        • Represents the total number of detected FRET molecules
+        • Sum of all counts (open + closed).
 
-        **a / b** → *Fraction of closed population*  
-        • Ratio of closed molecules to total molecules for that condition
+        **a / b** → *Fraction of closed molecules* for that condition.
 
         **Normalized fraction** → *(a/b) × (b₀/a₀)*  
-        • Scales each dataset to the reference condition (usually the lowest or 0 M)  
-        • The reference has value = 1.0; smaller values mean fewer molecules remain closed
-
-        💡 **Interpretation:**  
-        As your condition (e.g., denaturant concentration) increases, both `a/b` and the normalized fraction should decrease — showing the transition from a closed to an open state.
+        • Scales to a chosen reference (the first/lowest condition). The reference = 1.0.
         """)
-
 
     # ---- collect (condition, a, b) ----
     rows = []
     fit_figs = []
     for f in files:
         name = f.name
-        cond_val = parse_condition_value(name)
+        # Use the user-edited condition (M) for this file
+        try:
+            cond_val = float(df_cfg_edit.loc[df_cfg_edit["file"] == name, "condition"].values[0])
+        except Exception:
+            cond_val = np.nan
+
         raw2 = f.getvalue().decode("utf-8", errors="ignore")
         blks = split_numeric_blocks_with_headers(raw2)
-        cand = [i for i,(df,_,_,_) in enumerate(blks) if blks[i][0].shape[1] >= 8]
+        cand = [i for i, (df, _, _, _) in enumerate(blks) if blks[i][0].shape[1] >= 8]
         if not cand:
             continue
+
         chosen = int(pref_blk) if int(pref_blk) in cand else cand[0]
         df8 = blks[chosen][0]
-        # PIE closed peak
+
+        # PIE (closed peak fit → a)
         E_pie, W_pie = read_E_and_W_from_8col(df8, True)
         if user_edges is None:
             nb = auto_bins(E_pie, rule=rule) if bin_mode == "Auto (rule)" else 80
@@ -985,7 +1044,7 @@ with tabs[4]:
             edges_pie = user_edges
         a_counts, (xpie, ypie), popt = fit_closed_peak_area_PIE(E_pie, W_pie, edges_pie, closed_region)
 
-        # Classical total
+        # Classical (total → b)
         E_cl, W_cl = read_E_and_W_from_8col(df8, False)
         if user_edges is None:
             nb2 = auto_bins(E_cl, rule=rule) if bin_mode == "Auto (rule)" else 80
@@ -994,18 +1053,20 @@ with tabs[4]:
             edges_cl = user_edges
         counts_cl, _ = np.histogram(E_cl, bins=edges_cl, weights=W_cl, density=False)
         b_counts = float(np.nansum(counts_cl))
+
         rows.append(dict(file=name, condition=cond_val, block=chosen, a=a_counts, b=b_counts))
 
-        # plot per file
+        # Optional per-file figure
         if show_fit_plots:
             fig = go.Figure()
             cts_pie, _ = np.histogram(E_pie, bins=edges_pie, weights=W_pie, density=False)
             cx = 0.5 * (edges_pie[:-1] + edges_pie[1:])
             fig.add_bar(x=cx, y=cts_pie, width=np.diff(edges_pie), name="PIE counts", opacity=0.5)
+
             if np.isfinite(a_counts) and popt is not None:
                 xs = np.linspace(edges_pie[0], edges_pie[-1], 800)
-                y_fit_density = gaussian(xs, *popt)
-                y_fit_counts = y_fit_density * np.diff(edges_pie)[0]
+                y_fit_density = gaussian(xs, *popt)      # counts per E
+                y_fit_counts = y_fit_density * np.diff(edges_pie)[0]  # convert to counts per bin for plotting
                 fig.add_scatter(x=xs, y=y_fit_counts, mode="lines",
                                 name=f"Gaussian fit (a≈{a_counts:.0f} counts)")
             fig.add_vrect(x0=closed_region[0], x1=closed_region[1],
@@ -1018,19 +1079,31 @@ with tabs[4]:
         st.warning("No valid datasets found.")
         st.stop()
 
-    df = pd.DataFrame(rows).sort_values("condition")
-    # reference = first (or smallest)
-    ref_idx = df["condition"].fillna(np.inf).argmin()
-    a0, b0 = df.iloc[ref_idx][["a","b"]]
+    df = pd.DataFrame(rows)
+
+    # Reference is the smallest non-NaN condition value
+    if df["condition"].notna().any():
+        ref_idx = df["condition"].idxmin()
+        a0 = float(df.loc[ref_idx, "a"])
+        b0 = float(df.loc[ref_idx, "b"])
+    else:
+        ref_idx, a0, b0 = df.index[0], df.loc[df.index[0], "a"], df.loc[df.index[0], "b"]
+
+    df = df.sort_values("condition")
     df["a_over_b"] = df["a"] / df["b"]
-    df["fraction_norm"] = df["a_over_b"] * (b0 / a0) if (a0>0 and b0>0) else np.nan
+    df["fraction_norm"] = df["a_over_b"] * (b0 / a0) if (a0 > 0 and b0 > 0) else np.nan
 
     st.markdown("**Summary of a, b, a/b, and normalized fraction**")
     st.dataframe(df, use_container_width=True)
-    st.download_button("Download (CSV)", df.to_csv(index=False).encode(),
-                       "population_ratio_summary.csv", "text/csv", key="ratio_dl")
+    st.download_button(
+        "Download (CSV)",
+        df.to_csv(index=False).encode(),
+        "population_ratio_summary.csv",
+        "text/csv",
+        key="ratio_dl",
+    )
 
-    # plots
+    # Plots vs condition (if conditions are present)
     if df["condition"].notna().any():
         fig1 = go.Figure()
         fig1.add_scatter(x=df["condition"], y=df["a_over_b"], mode="lines+markers", name="a/b")
@@ -1039,7 +1112,7 @@ with tabs[4]:
 
         fig2 = go.Figure()
         fig2.add_scatter(x=df["condition"], y=df["fraction_norm"], mode="lines+markers",
-                         name="(a/b)*(b₀/a₀)")
+                         name="(a/b) × (b₀/a₀)")
         fig2.update_layout(xaxis_title=x_label, yaxis_title="Fraction (normalized)",
                            title="Normalized fraction vs condition")
         st.plotly_chart(fig2, use_container_width=True, key="ratio_plot2")
@@ -1048,4 +1121,3 @@ with tabs[4]:
         st.markdown("**PIE histograms with Gaussian fits (closed peak)**")
         for i, fig in enumerate(fit_figs):
             st.plotly_chart(fig, use_container_width=True, key=f"ratio_fitfig_{i}")
-
