@@ -93,7 +93,7 @@ def auto_bins(x, rule="Freedman–Diaconis"):
         if std == 0:
             return int(np.clip(np.sqrt(n), 10, 200))
         bw = 3.5 * std * (n ** (-1 / 3))
-    else:
+    else:  # Sturges
         return int(np.clip(np.ceil(np.log2(n) + 1), 10, 200))
     rng = np.nanmax(x) - np.nanmin(x)
     if rng <= 0:
@@ -102,7 +102,7 @@ def auto_bins(x, rule="Freedman–Diaconis"):
 
 
 def best_autofit(centers, hist, xmin, xmax):
-    """Try 1-Gaussian and 2-Gaussian; pick by AICc with simple separation sanity."""
+    """Try 1-Gaussian and 2-Gaussian; pick by AICc with separation sanity."""
     z = np.asarray(hist, float)
     x = np.asarray(centers, float)
     m = np.isfinite(z) & np.isfinite(x)
@@ -111,7 +111,7 @@ def best_autofit(centers, hist, xmin, xmax):
         return None
 
     z_s = gaussian_filter1d(z, sigma=max(1, int(len(z) * 0.03)))
-    binw = np.median(np.diff(x))
+    binw = np.median(np.diff(x)) if len(x) > 1 else 0.01
     sig_min = max(0.5 * binw, 1e-4)
     sig_max = max((xmax - xmin) / 1.25, sig_min * 2)
     y0_min = 0.0
@@ -145,7 +145,7 @@ def best_autofit(centers, hist, xmin, xmax):
         pass
 
     # 2G init
-    peaks, _ = find_peaks(z_s, distance=max(2, int(0.07 / np.mean(np.diff(x)))))
+    peaks, _ = find_peaks(z_s, distance=max(2, int(0.07 / max(np.mean(np.diff(x)), 1e-6))))
     peaks = peaks[np.argsort(z_s[peaks])][::-1]
     if len(peaks) >= 2:
         mu1_0, mu2_0 = x[peaks[:2]]
@@ -195,24 +195,10 @@ def best_autofit(centers, hist, xmin, xmax):
 
     if p2 is not None and sep_ok and aicc2 + 2 < aicc1:
         yhat = gaussian2(x, *p2)
-        return {
-            "model": "2G",
-            "params": p2,
-            "perr": perr2,
-            "R2": r2_score(z, yhat),
-            "aicc": aicc2,
-            "yhat": (x, yhat),
-        }
+        return {"model": "2G", "params": p2, "perr": perr2, "R2": r2_score(z, yhat), "aicc": aicc2, "yhat": (x, yhat)}
     elif p1 is not None:
         yhat = gaussian(x, *p1)
-        return {
-            "model": "1G",
-            "params": p1,
-            "perr": perr1,
-            "R2": r2_score(z, yhat),
-            "aicc": aicc1,
-            "yhat": (x, yhat),
-        }
+        return {"model": "1G", "params": p1, "perr": perr1, "R2": r2_score(z, yhat), "aicc": aicc1, "yhat": (x, yhat)}
     else:
         return None
 
@@ -248,44 +234,31 @@ def clamp_manual_bins_E(min_label, max_label, bins_label, default_bins=80, key_p
     centers = 0.5 * (edges[:-1] + edges[1:])
     return edges, centers
 
+
 def _ensure_edges_from_grid(x_edges_or_centers, nbins=None, rng=(0.0, 1.0)):
     """
-    Return valid histogram *edges*.
-    - If an array of length >= 3 is passed, detect if it's edges or centers.
-    - If it's centers, convert to edges by mid-point interpolation.
-    - If nothing usable is passed, fall back to linspace over rng with nbins.
+    Return valid histogram *edges* from edges or centers; fallback to linspace.
     """
     x = np.asarray(x_edges_or_centers) if x_edges_or_centers is not None else None
-
-    # Case 1: valid edges?
     if x is not None and x.ndim == 1 and len(x) >= 2:
-        # If strictly increasing and looks like edges (monotone non-equal spacing OK)
         if np.all(np.diff(x) > 0):
-            return x
-
-    # Case 2: centers → edges
+            return x  # already edges
     if x is not None and x.ndim == 1 and len(x) >= 3:
         diffs = np.diff(x)
-        # interior edges are midpoints between centers
-        inner = x[:-1] + diffs/2.0
-        # extrapolate first/last edges assuming same spacing at ends
-        first = x[0] - diffs[0]/2.0
-        last  = x[-1] + diffs[-1]/2.0
+        inner = x[:-1] + diffs / 2.0
+        first = x[0] - diffs[0] / 2.0
+        last = x[-1] + diffs[-1] / 2.0
         return np.r_[first, inner, last]
-
-    # Case 3: fall back
     if nbins is None or nbins < 2:
         nbins = 40
     lo, hi = float(rng[0]), float(rng[1])
     return np.linspace(lo, hi, nbins + 1)
 
-
-
 # -------------------------
 # UI - file upload
 # -------------------------
 uploaded = st.file_uploader(
-    "Upload your .dat file (for tabs 1–5)", type=["dat", "txt", "csv"], key="uploader_full_bestall"
+    "Upload your .dat file", type=["dat", "txt", "csv"], key="uploader_full_bestall"
 )
 if uploaded is None:
     st.info("Upload your file to continue.")
@@ -295,15 +268,7 @@ raw = uploaded.getvalue().decode("utf-8", errors="ignore")
 blocks = split_numeric_blocks_with_headers(raw)
 
 colorscales = [
-    "Viridis",
-    "Plasma",
-    "Magma",
-    "Inferno",
-    "Cividis",
-    "Turbo",
-    "IceFire",
-    "YlGnBu",
-    "Greys",
+    "Viridis","Plasma","Magma","Inferno","Cividis","Turbo","IceFire","YlGnBu","Greys",
 ]
 
 tabs = st.tabs(
@@ -311,12 +276,12 @@ tabs = st.tabs(
         "Joint (Heatmap + Marginals)",
         "FRET Analysis",
         "AUC Region Analyzer",
-        "FRET"
+        "FRET ↔ Distance",
     ]
 )
 
 # -------------------------
-# TAB 4: Joint view
+# TAB 1: Joint view
 # -------------------------
 with tabs[0]:
     st.subheader("Joint view: S–E heatmap + S/E histograms (from 8-col table)")
@@ -330,16 +295,14 @@ with tabs[0]:
         with col1:
             iM = st.selectbox(
                 "Matrix block (S×E heatmap)",
-                mats,
-                key="joint_hm_block_best",
+                mats, key="joint_hm_block_best",
                 format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})",
             )
             smooth = st.slider("Heatmap smoothing σ", 0.0, 6.0, 1.0, 0.1, key="joint_hm_smooth_best")
         with col2:
             iT = st.selectbox(
                 "8-col table block (S/E)",
-                t8,
-                key="joint_t8_block_best",
+                t8, key="joint_t8_block_best",
                 format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})",
             )
             which = st.selectbox("Histogram source", ["PIE", "Classical", "Both"], key="joint_hist_source_best")
@@ -347,10 +310,10 @@ with tabs[0]:
             style = st.selectbox("Histogram style", ["Bars", "Lines (smoothed)"], key="joint_style_best")
             smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="joint_smooth_lines_best")
 
-        # Allow compact height (prevents stretched look)
+        # compact figure height
         fig_height = st.slider("Figure height (px)", 320, 900, 420, 10, key="joint_fig_height")
 
-        # Heatmap matrix and default grid
+        # Heatmap matrix
         M = blocks[iM][0].astype(float).replace([np.inf, -np.inf], np.nan).to_numpy()
         Mplot = (
             gaussian_filter1d(gaussian_filter1d(M, sigma=smooth, axis=0), sigma=smooth, axis=1)
@@ -375,7 +338,7 @@ with tabs[0]:
         S_cl, W_S_cl, S_pie, W_S_pie = col("S_Classical"), col("Occur._S_Classical"), col("S_PIE"), col("Occur._S_PIE")
         E_cl, W_E_cl, E_pie, W_E_pie = col("E_Classical"), col("Occur._E_Classical"), col("E_PIE"), col("Occur._E_PIE")
 
-        # --- robust edges helpers ---
+        # --- helpers ---
         def hist1(x, w, edges):
             m = np.isfinite(x) & np.isfinite(w) & (w >= 0)
             h, _ = np.histogram(x[m], bins=edges, weights=w[m])
@@ -398,15 +361,14 @@ with tabs[0]:
                 first = a[0] - d[0]/2.0
                 last  = a[-1] + d[-1]/2.0
                 edges = np.r_[first, inner, last]
-            else:  # 2 points -> make a tiny 2-bin set
+            else:  # 2 points
                 edges = np.linspace(a.min(), a.max(), 3)
             if edges[-1] < edges[0]:
                 edges = edges[::-1]
             return edges
 
-        # --- choose binning for histograms ---
+        # choose binning for histograms
         if match_bins:
-            # Build proper *edges* from heatmap resolution
             e_edges = _edges_from_centers_or_edges(e_edges_hm, nbins=nx, rng=(0.0, 1.0))
             s_edges = _edges_from_centers_or_edges(s_edges_hm, nbins=ny, rng=(0.0, 1.0))
             if (len(e_edges) < 2) or (len(s_edges) < 2):
@@ -428,18 +390,18 @@ with tabs[0]:
             e_x = 0.5 * (e_edges[:-1] + e_edges[1:])
             s_y = 0.5 * (s_edges[:-1] + s_edges[1:])
 
-        # histograms (Counts; you can normalize if you’d like)
+        # histograms
         e_hist_cl = hist1(E_cl, W_E_cl, e_edges)
         e_hist_pie = hist1(E_pie, W_E_pie, e_edges)
         s_hist_cl = hist1(S_cl, W_S_cl, s_edges)
         s_hist_pie = hist1(S_pie, W_S_pie, s_edges)
 
-        # --- figure layout (more compact) ---
+        # --- figure layout ---
         figj = make_subplots(
             rows=2, cols=2,
             specs=[[{"type": "xy"}, {"type": "xy"}], [{"type": "heatmap"}, {"type": "xy"}]],
-            column_widths=[0.72, 0.28],    # narrower right panel
-            row_heights=[0.22, 0.78],      # shorter top histogram
+            column_widths=[0.72, 0.28],
+            row_heights=[0.22, 0.78],
             horizontal_spacing=0.03,
             vertical_spacing=0.03,
         )
@@ -481,13 +443,65 @@ with tabs[0]:
             showlegend=True,
             bargap=0,
             margin=dict(l=40, r=10, t=40, b=40),
-            height=fig_height,     # <- compact figure
+            height=fig_height,
         )
+
+        # --- Peak detection for autofill into calculator tab ---
+        def _peak_from_hist(x_centers, y_counts):
+            if len(y_counts) == 0 or np.all(np.asarray(y_counts) <= 0):
+                return None
+            i = int(np.nanargmax(y_counts))
+            return float(x_centers[i]), i
+
+        peak_E_cl, idx_cl = (None, None)
+        peak_E_pie, idx_pie = (None, None)
+        if np.any(e_hist_cl): 
+            tmp = _peak_from_hist(e_x, e_hist_cl); 
+            if tmp: peak_E_cl, idx_cl = tmp
+        if np.any(e_hist_pie):
+            tmp = _peak_from_hist(e_x, e_hist_pie);
+            if tmp: peak_E_pie, idx_pie = tmp
+
+        refine = st.checkbox("Refine peaks with Gaussian (quick fit)", value=False, key="joint_refine_peaks_best")
+        if refine and (idx_cl is not None or idx_pie is not None):
+            def _refine_gaussian(xc, yc, idx, win=4):
+                lo = max(0, idx - win); hi = min(len(xc), idx + win + 1)
+                xw = np.asarray(xc[lo:hi], dtype=float)
+                yw = np.asarray(yc[lo:hi], dtype=float)
+                if xw.size < 3 or np.all(yw <= 0): return float(xc[idx])
+                def gfun(x, A, mu, sig, B): 
+                    return A * np.exp(-0.5 * ((x - mu) / max(sig, 1e-6))**2) + B
+                A0 = float(np.nanmax(yw)); mu0 = float(xc[idx])
+                sig0 = 2.0 * (np.median(np.diff(xc)) if len(xc)>1 else 0.01)
+                B0 = float(np.nanmin(yw))
+                try:
+                    popt, _ = curve_fit(gfun, xw, yw, p0=[A0, mu0, sig0, B0], maxfev=20000)
+                    _, mu, _, _ = popt
+                    return float(np.clip(mu, 0.0, 1.0))
+                except Exception:
+                    return float(xc[idx])
+            if idx_cl is not None:
+                peak_E_cl = _refine_gaussian(e_x, e_hist_cl, idx_cl, win=4)
+            if idx_pie is not None:
+                peak_E_pie = _refine_gaussian(e_x, e_hist_pie, idx_pie, win=4)
+
+        # show peak markers
+        if peak_E_cl is not None and which in ("Classical", "Both"):
+            figj.add_vline(x=peak_E_cl, line_width=1.5, line_dash="dot", line_color="#2a9d8f", row=1, col=1)
+        if peak_E_pie is not None and which in ("PIE", "Both"):
+            figj.add_vline(x=peak_E_pie, line_width=1.5, line_dash="dot", line_color="#e76f51", row=1, col=1)
+
+        # stash peaks for calculator tab
+        st.session_state["joint_peaks"] = {
+            "Classical": peak_E_cl,
+            "PIE": peak_E_pie,
+            "_meta": {"bin_centers": e_x.tolist()}
+        }
 
         st.plotly_chart(figj, use_container_width=True, key="fig_joint_view")
 
 # -------------------------
-# TAB 5: FRET Analysis (E only)
+# TAB 2: FRET Analysis (single E histogram)
 # -------------------------
 with tabs[1]:
     st.subheader("FRET – Histogram + Best Auto-fit (PIE or Classical, E only)")
@@ -497,36 +511,23 @@ with tabs[1]:
     else:
         iP = st.selectbox(
             "Pick the 8-column block",
-            candidates,
-            key="fret_block_best",
+            candidates, key="fret_block_best",
             format_func=lambda i: f"Block {i} (shape {blocks[i][0].shape})",
         )
         df = blocks[iP][0].copy()
         df.columns = [
-            "Occur_S_Classical",
-            "S_Classical",
-            "Occur_S_PIE",
-            "S_PIE",
-            "E_Classical",
-            "Occur_E_Classical",
-            "E_PIE",
-            "Occur_E_PIE",
+            "Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE",
+            "E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE",
         ] + [f"Extra_{i}" for i in range(max(0, df.shape[1] - 8))]
 
         source = st.radio("E source", ["PIE", "Classical"], index=0, horizontal=True, key="fret_source_best")
-        bin_mode = st.radio(
-            "Binning", ["Auto (rule)", "Manual"], index=0, horizontal=True, key="fret_binmode_best"
-        )
+        bin_mode = st.radio("Binning", ["Auto (rule)", "Manual"], index=0, horizontal=True, key="fret_binmode_best")
 
         if bin_mode == "Auto (rule)":
-            rule = st.selectbox(
-                "Auto-binning rule", ["Freedman–Diaconis", "Scott", "Sturges"], index=0, key="fret_rule_best"
-            )
+            rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis", "Scott", "Sturges"], index=0, key="fret_rule_best")
             edges = None
         else:
-            edges, _ = clamp_manual_bins_E(
-                "E min", "E max", "Bins (manual)", default_bins=80, key_prefix="fret"
-            )
+            edges, _ = clamp_manual_bins_E("E min", "E max", "Bins (manual)", default_bins=80, key_prefix="fret")
 
         style = st.selectbox("Histogram style", ["Bars", "Lines (smoothed)"], index=0, key="fret_style_best")
         smooth_bins = st.slider("Line smoothing (σ in bins)", 0.0, 3.0, 1.0, 0.2, key="fret_smooth_best")
@@ -566,47 +567,28 @@ with tabs[1]:
                 if fit:
                     if fit["model"] == "1G":
                         fig.add_trace(
-                            go.Scatter(
-                                x=xs,
-                                y=gaussian(xs, *fit["params"]),
-                                mode="lines",
-                                name=f"Best fit 1G (R²={fit['R2']:.3f})",
-                            )
+                            go.Scatter(x=xs, y=gaussian(xs, *fit["params"]),
+                                       mode="lines", name=f"Best fit 1G (R²={fit['R2']:.3f})")
                         )
                     else:
                         y0, m1, s1, A1, m2, s2, A2 = fit["params"]
                         fig.add_trace(
-                            go.Scatter(
-                                x=xs,
-                                y=gaussian2(xs, *fit["params"]),
-                                mode="lines",
-                                name=f"Best fit 2G (R²={fit['R2']:.3f})",
-                            )
+                            go.Scatter(x=xs, y=gaussian2(xs, *fit["params"]),
+                                       mode="lines", name=f"Best fit 2G (R²={fit['R2']:.3f})")
                         )
                         fig.add_trace(
-                            go.Scatter(
-                                x=xs,
-                                y=gaussian(xs, y0, m1, s1, A1) - y0,
-                                mode="lines",
-                                name="Component 1",
-                                line=dict(dash="dash"),
-                            )
+                            go.Scatter(x=xs, y=gaussian(xs, y0, m1, s1, A1) - y0,
+                                       mode="lines", name="Component 1", line=dict(dash="dash"))
                         )
                         fig.add_trace(
-                            go.Scatter(
-                                x=xs,
-                                y=gaussian(xs, y0, m2, s2, A2) - y0,
-                                mode="lines",
-                                name="Component 2",
-                                line=dict(dash="dash"),
-                            )
+                            go.Scatter(x=xs, y=gaussian(xs, y0, m2, s2, A2) - y0,
+                                       mode="lines", name="Component 2", line=dict(dash="dash"))
                         )
             fig.update_layout(xaxis_title="FRET efficiency, E", yaxis_title="Density")
             st.plotly_chart(fig, use_container_width=True, key="fig_fret_analysis")
 
-
 # -------------------------
-# TAB 7: AUC Region Analyzer
+# TAB 3: AUC Region Analyzer
 # -------------------------
 with tabs[2]:
     st.subheader("AUC Region Analyzer – stacked histograms (bars only)")
@@ -624,45 +606,28 @@ with tabs[2]:
         source = st.radio("E source", ["PIE", "Classical"], index=0, horizontal=True, key="auc_source_best")
         normalize = st.checkbox("Normalize each histogram area to 1", value=True, key="auc_norm_best")
 
-        # NEW: let user choose which 8-col block to use per file (if available)
         preferred_idx = st.number_input(
             "Preferred 8-column block index (applies to each file)",
             min_value=0, value=1, step=1, key="auc_pref_idx"
         )
 
-        bin_mode = st.radio(
-            "Binning", ["Auto (rule)", "Manual (fixed)"], index=0, horizontal=True, key="auc_binmode_best"
-        )
+        bin_mode = st.radio("Binning", ["Auto (rule)", "Manual (fixed)"], index=0, horizontal=True, key="auc_binmode_best")
         if bin_mode == "Auto (rule)":
-            rule = st.selectbox(
-                "Auto-binning rule (shared)", ["Freedman–Diaconis", "Scott", "Sturges"],
-                index=0, key="auc_rule_best"
-            )
+            rule = st.selectbox("Auto-binning rule (shared)", ["Freedman–Diaconis", "Scott", "Sturges"], index=0, key="auc_rule_best")
             manual_edges = None
         else:
-            manual_edges, _ = clamp_manual_bins_E(
-                "Range min (E)", "Range max (E)", "Number of bins (shared)",
-                default_bins=80, key_prefix="auc"
-            )
+            manual_edges, _ = clamp_manual_bins_E("Range min (E)", "Range max (E)", "Number of bins (shared)", default_bins=80, key_prefix="auc")
 
         region = st.slider("AUC region (E-range)", 0.0, 1.0, (0.70, 1.00), 0.01, key="auc_region_best")
 
-        # Force BAR histograms in this tab
-        style = "Bars"
-        smooth_bins = 0.0  # not used for bars
-
-        # ---- Load datasets (respect preferred block) ----
-        datasets = []  # list of tuples: (file_name, chosen_block_idx, E_array, W_array)
+        # Bars only in this tab
+        datasets = []  # (file_name, chosen_block_idx, E_array, W_array)
         for f in files:
             raw2 = f.getvalue().decode("utf-8", errors="ignore")
             blks = split_numeric_blocks_with_headers(raw2)
-
-            # find all 8+ column tables
             cand = [i for i, (df, _, _, _) in enumerate(blks) if blks[i][0].shape[1] >= 8]
             if not cand:
                 continue
-
-            # choose preferred index if valid; else fallback to first 8-col block
             pick = int(preferred_idx)
             chosen = pick if pick in cand else cand[0]
 
@@ -688,11 +653,10 @@ with tabs[2]:
         if not datasets:
             st.warning("No valid 8-column blocks found across the files.")
         else:
-            # Build shared bins (either auto or manual)
+            # shared bins
             if manual_edges is None:
                 all_E = np.concatenate([E for _, _, E, _ in datasets])
-                xmin = float(np.nanmin(all_E))
-                xmax = float(np.nanmax(all_E))
+                xmin = float(np.nanmin(all_E)); xmax = float(np.nanmax(all_E))
                 nb = auto_bins(all_E, rule=rule)
                 edges = np.linspace(xmin, xmax, nb + 1)
             else:
@@ -710,13 +674,8 @@ with tabs[2]:
                     y = y / area_total
 
                 fig = go.Figure()
-                # Bars only
                 fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.7)
-
-                fig.add_vrect(
-                    x0=region[0], x1=region[1],
-                    fillcolor="LightSalmon", opacity=0.25, layer="below", line_width=0
-                )
+                fig.add_vrect(x0=region[0], x1=region[1], fillcolor="LightSalmon", opacity=0.25, layer="below", line_width=0)
                 fig.update_layout(
                     title=f"{nm} — block {blk_idx}",
                     xaxis_title="FRET efficiency, E",
@@ -753,8 +712,9 @@ with tabs[2]:
                 "text/csv",
                 key="dl_auc_summary",
             )
+
 # -------------------------
-# TAB: FRET Analysis — E ↔ r calculator
+# TAB 4: FRET ↔ Distance calculator (with Joint-peak autofill)
 # -------------------------
 with tabs[3]:
     st.subheader("FRET ↔ Distance Calculator")
@@ -764,12 +724,26 @@ with tabs[3]:
         direction = st.radio("Conversion", ["E → r (nm)", "r (nm) → E"], index=0, horizontal=True, key="fr_dir")
         R0 = st.number_input("Förster radius R₀ (nm)", min_value=0.1, max_value=20.0, value=6.4, step=0.1, key="fr_R0")
         st.caption("Tip: For this lab, use R₀ ≈ 6.4 nm (given in the protocol).")
-
     with colB:
         show_plot = st.checkbox("Show quick plot", value=True, key="fr_plot")
 
-    st.markdown("**Input** (single value, list, or CSV):")
+    # Optional autofill from Joint tab peaks
+    joint_peaks = st.session_state.get("joint_peaks", {})
+    can_autofill = direction.startswith("E") and any(joint_peaks.get(k) is not None for k in ("Classical","PIE"))
+    if can_autofill:
+        c1, c2 = st.columns(2)
+        with c1:
+            src_peak = st.selectbox("Use peak E from Joint tab", ["Classical", "PIE"], key="fr_src_peak")
+        with c2:
+            if joint_peaks.get(src_peak) is not None:
+                if st.button("Send peak to calculator", key="fr_send_peak"):
+                    val = f"{joint_peaks[src_peak]:.4f}"
+                    prev = st.session_state.get("fr_text", "")
+                    st.session_state["fr_text"] = (val if not prev.strip() else prev.strip() + ", " + val)
+            else:
+                st.info(f"No peak detected for {src_peak}. Compute hist on Joint tab.")
 
+    st.markdown("**Input** (single value, list, or CSV):")
     col1, col2 = st.columns(2)
     with col1:
         txt = st.text_area(
@@ -779,47 +753,33 @@ with tabs[3]:
             key="fr_text"
         )
     with col2:
-        up = st.file_uploader(
-            "Or upload CSV",
-            type=["csv"],
-            key="fr_csv"
-        )
+        up = st.file_uploader("Or upload CSV", type=["csv"], key="fr_csv")
         help_col = "E" if direction.startswith("E") else "r"
         st.caption(f"If you upload CSV, include a column named **{help_col}**.")
 
-    import io, numpy as np, pandas as pd
-
     def _parse_numbers(s: str):
-        if not s.strip():
+        if not s or not s.strip():
             return np.array([])
-        # split on commas, whitespace, semicolons
         parts = [p for p in re.split(r"[,\s;]+", s.strip()) if p]
         vals = []
         for p in parts:
-            try:
-                vals.append(float(p))
-            except Exception:
-                vals.append(np.nan)
+            try: vals.append(float(p))
+            except Exception: vals.append(np.nan)
         return np.array(vals, dtype=float)
-
-    import re
 
     # Load inputs
     arr = np.array([], dtype=float)
-    src = "text"
     if up is not None:
         try:
             df_in = pd.read_csv(up)
             if direction.startswith("E"):
                 if "E" in df_in.columns:
                     arr = pd.to_numeric(df_in["E"], errors="coerce").to_numpy()
-                    src = "csv"
                 else:
                     st.error("CSV must contain a column named 'E'.")
             else:
                 if "r" in df_in.columns:
                     arr = pd.to_numeric(df_in["r"], errors="coerce").to_numpy()
-                    src = "csv"
                 else:
                     st.error("CSV must contain a column named 'r'.")
         except Exception as e:
@@ -848,15 +808,13 @@ with tabs[3]:
         r = fret_to_distance(E, R0)
         df_out = pd.DataFrame({"E": E, "r_nm": r})
         valid = np.isfinite(r).sum()
-        total = len(r)
-        st.write(f"Converted **{valid}/{total}** values (E must be in (0,1)).")
+        st.write(f"Converted **{valid}/{len(r)}** values (E must be in (0,1)).")
     else:
         r = arr
         E = distance_to_fret(r, R0)
         df_out = pd.DataFrame({"r_nm": r, "E": E})
         valid = np.isfinite(E).sum()
-        total = len(E)
-        st.write(f"Converted **{valid}/{total}** values (r must be > 0).")
+        st.write(f"Converted **{valid}/{len(E)}** values (r must be > 0).")
 
     # Show table
     st.dataframe(df_out, use_container_width=True, height=240)
@@ -872,15 +830,11 @@ with tabs[3]:
 
     # Quick plot
     if show_plot:
-        import plotly.graph_objects as go
-        import numpy as np
-
         if direction.startswith("E"):
             xs = np.linspace(0.001, 0.999, 400)
             ys = fret_to_distance(xs, R0)
             fig = go.Figure()
             fig.add_scatter(x=xs, y=ys, mode="lines", name="r(E)")
-            # mark input points
             if len(arr) > 0:
                 fig.add_scatter(x=E, y=r, mode="markers", name="Your points")
             fig.update_layout(
