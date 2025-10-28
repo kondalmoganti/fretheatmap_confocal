@@ -589,10 +589,11 @@ with tabs[1]:
             st.plotly_chart(fig, use_container_width=True, key="fig_fret_analysis")
 
 # -------------------------
+# -------------------------
 # TAB 3: AUC Region Analyzer
 # -------------------------
 with tabs[2]:
-    st.subheader("AUC Region Analyzer – stacked histograms (bars only)")
+    st.subheader("AUC Region Analyzer – stacked histograms")
 
     files = st.file_uploader(
         "Upload one or more .dat files",
@@ -605,24 +606,40 @@ with tabs[2]:
         st.info("Upload multiple files to start.")
     else:
         source = st.radio("E source", ["PIE", "Classical"], index=0, horizontal=True, key="auc_source_best")
-        normalize = st.checkbox("Normalize each histogram area to 1", value=True, key="auc_norm_best")
 
+        # NEW: y-axis control (plotting only)
+        y_mode = st.radio(
+            "Histogram y-axis (plotting)",
+            ["Counts", "Density (area=1)"],
+            index=1, horizontal=True, key="auc_y_mode"
+        )
+        plot_as_density = (y_mode == "Density (area=1)")
+
+        # Keep your preferred 8-col block picker
         preferred_idx = st.number_input(
             "Preferred 8-column block index (applies to each file)",
             min_value=0, value=1, step=1, key="auc_pref_idx"
         )
 
-        bin_mode = st.radio("Binning", ["Auto (rule)", "Manual (fixed)"], index=0, horizontal=True, key="auc_binmode_best")
+        bin_mode = st.radio(
+            "Binning", ["Auto (rule)", "Manual (fixed)"], index=0, horizontal=True, key="auc_binmode_best"
+        )
         if bin_mode == "Auto (rule)":
-            rule = st.selectbox("Auto-binning rule (shared)", ["Freedman–Diaconis", "Scott", "Sturges"], index=0, key="auc_rule_best")
+            rule = st.selectbox(
+                "Auto-binning rule (shared)", ["Freedman–Diaconis", "Scott", "Sturges"],
+                index=0, key="auc_rule_best"
+            )
             manual_edges = None
         else:
-            manual_edges, _ = clamp_manual_bins_E("Range min (E)", "Range max (E)", "Number of bins (shared)", default_bins=80, key_prefix="auc")
+            manual_edges, _ = clamp_manual_bins_E(
+                "Range min (E)", "Range max (E)", "Number of bins (shared)",
+                default_bins=80, key_prefix="auc"
+            )
 
         region = st.slider("AUC region (E-range)", 0.0, 1.0, (0.70, 1.00), 0.01, key="auc_region_best")
 
-        # Bars only in this tab
-        datasets = []  # (file_name, chosen_block_idx, E_array, W_array)
+        # ---- Load datasets ----
+        datasets = []
         for f in files:
             raw2 = f.getvalue().decode("utf-8", errors="ignore")
             blks = split_numeric_blocks_with_headers(raw2)
@@ -634,11 +651,9 @@ with tabs[2]:
 
             df = blks[chosen][0].copy()
             df.columns = [
-                "Occur_S_Classical", "S_Classical",
-                "Occur_S_PIE", "S_PIE",
-                "E_Classical", "Occur_E_Classical",
-                "E_PIE", "Occur_E_PIE",
-            ] + [f"Extra_{i}" for i in range(max(0, df.shape[1] - 8))]
+                "Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE",
+                "E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE",
+            ] + [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
 
             if source == "PIE":
                 E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
@@ -654,7 +669,7 @@ with tabs[2]:
         if not datasets:
             st.warning("No valid 8-column blocks found across the files.")
         else:
-            # shared bins
+            # Shared binning
             if manual_edges is None:
                 all_E = np.concatenate([E for _, _, E, _ in datasets])
                 xmin = float(np.nanmin(all_E)); xmax = float(np.nanmax(all_E))
@@ -668,40 +683,44 @@ with tabs[2]:
 
             rows = []
             for i, (nm, blk_idx, E, W) in enumerate(datasets):
-                hist, _ = np.histogram(E, bins=edges, weights=W, density=False)
-                y = hist.astype(float)
-                area_total = (y * binw).sum()
-                if normalize and area_total > 0:
-                    y = y / area_total
+                # Always compute COUNTS for correctness
+                counts, _ = np.histogram(E, bins=edges, weights=W, density=False)
+                area_counts = float((counts * binw).sum())  # total counts area (counts × bin width)
+                # Fraction within region (independent of plotting mode)
+                rmin, rmax = region
+                mask_bins = (centers >= rmin) & (centers < rmax)
+                auc_counts   = float((counts[mask_bins] * binw).sum())
+                auc_fraction = (counts[mask_bins].sum() / counts.sum()) if counts.sum() > 0 else np.nan
+
+                # Plot as desired
+                if plot_as_density and area_counts > 0:
+                    y_plot = counts / area_counts   # probability per bin; area under curve = 1
+                    y_label = "Density (area=1)"
+                else:
+                    y_plot = counts
+                    y_label = "Counts per bin"
 
                 fig = go.Figure()
-                fig.add_bar(x=centers, y=y, width=np.diff(edges), name=nm, opacity=0.7)
-                fig.add_vrect(x0=region[0], x1=region[1], fillcolor="LightSalmon", opacity=0.25, layer="below", line_width=0)
+                fig.add_bar(x=centers, y=y_plot, width=np.diff(edges), name=nm, opacity=0.7)
+                fig.add_vrect(x0=rmin, x1=rmax, fillcolor="LightSalmon", opacity=0.25,
+                              layer="below", line_width=0)
                 fig.update_layout(
                     title=f"{nm} — block {blk_idx}",
                     xaxis_title="FRET efficiency, E",
-                    yaxis_title=("Density (area=1)" if normalize else "Counts per bin"),
+                    yaxis_title=y_label,
                     margin=dict(l=40, r=10, t=40, b=40),
                     showlegend=False,
                 )
                 st.plotly_chart(fig, use_container_width=True, key=f"fig_auc_{i}")
 
-                rmin, rmax = region
-                mask_bins = (centers >= rmin) & (centers < rmax)
-                auc = (y[mask_bins] * binw).sum()
-                rows.append(
-                    {
-                        "file": nm,
-                        "block_used": blk_idx,
-                        "bins": len(edges) - 1,
-                        "E_min": edges[0],
-                        "E_max": edges[-1],
-                        "region_min": rmin,
-                        "region_max": rmax,
-                        "AUC_in_region": auc,
-                        "normalized": normalize,
-                    }
-                )
+                rows.append({
+                    "file": nm, "block_used": blk_idx,
+                    "bins": len(edges) - 1, "E_min": edges[0], "E_max": edges[-1],
+                    "region_min": rmin, "region_max": rmax,
+                    "auc_counts": auc_counts,               # absolute area (counts × bin width)
+                    "auc_fraction": auc_fraction,           # fraction in region (0–1)
+                    "plot_yaxis": y_label,
+                })
 
             df_auc = pd.DataFrame(rows)
             st.subheader("AUC summary for selected region")
