@@ -863,7 +863,7 @@ with tabs[3]:
 # -------------------------
 # TAB: Population ratio (a/b) analysis — general titration
 # -------------------------
-with tabs[5]:
+with tabs[4]:
     st.subheader("Population ratio (a/b) and normalized fraction vs condition")
 
     files = st.file_uploader(
