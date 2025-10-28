@@ -277,6 +277,7 @@ tabs = st.tabs(
         "FRET Analysis",
         "AUC Region Analyzer",
         "FRET ↔ Distance",
+        "Population ratio (a/b) analysis"
     ]
 )
 
@@ -858,3 +859,170 @@ with tabs[3]:
             st.plotly_chart(fig, use_container_width=True, key="fr_plot2")
 
     st.caption("Formulas:  r = R₀ · (1/E − 1)^(1/6)  and  E = 1 / (1 + (r/R₀)^6)")
+
+# -------------------------
+# TAB: Population ratio (a/b) analysis — general titration
+# -------------------------
+with tabs[5]:
+    st.subheader("Population ratio (a/b) and normalized fraction vs condition")
+
+    files = st.file_uploader(
+        "Upload all measurement files (.dat) including your reference (e.g. lowest condition)",
+        type=["dat", "txt", "csv"],
+        accept_multiple_files=True,
+        key="ratio_uploader",
+    )
+
+    if not files:
+        st.info("Upload multiple measurement files (e.g. 0, 0.5, 1.5, ...) to continue.")
+        st.stop()
+
+    # User-specified label for x-axis (can be anything: [Urea] (M), Temperature (°C), etc.)
+    x_label = st.text_input("X-axis label (condition)", value="[Condition]", key="ratio_xlabel")
+
+    pref_blk = st.number_input("Preferred 8-column block index", min_value=0, value=1, step=1, key="ratio_blk")
+
+    bin_mode = st.radio("Binning for E", ["Auto (rule)", "Manual"], index=0, horizontal=True, key="ratio_binmode")
+    if bin_mode == "Auto (rule)":
+        rule = st.selectbox("Auto-binning rule", ["Freedman–Diaconis","Scott","Sturges"], index=0, key="ratio_rule")
+        user_edges = None
+    else:
+        user_edges, _ = clamp_manual_bins_E("E min", "E max", "Bins", default_bins=80, key_prefix="ratio_bins")
+
+    closed_region = st.slider("Closed-peak fit region (E-range)", 0.0, 1.0, (0.70, 1.00), 0.01, key="ratio_region")
+    show_fit_plots = st.checkbox("Show PIE histogram + Gaussian fit for each file", value=True, key="ratio_showfits")
+
+    # --- helpers ---
+    def parse_condition_value(name: str):
+        """Extract first floating-point number from filename."""
+        m = re.search(r"([0-9]*\.?[0-9]+)", name)
+        return float(m.group(1)) if m else np.nan
+
+    def read_E_and_W_from_8col(df, use_pie: bool):
+        df = df.copy()
+        df.columns = [
+            "Occur_S_Classical","S_Classical","Occur_S_PIE","S_PIE",
+            "E_Classical","Occur_E_Classical","E_PIE","Occur_E_PIE",
+        ] + [f"Extra_{i}" for i in range(max(0, df.shape[1]-8))]
+        if use_pie:
+            E = pd.to_numeric(df["E_PIE"], errors="coerce").to_numpy()
+            W = pd.to_numeric(df["Occur_E_PIE"], errors="coerce").to_numpy()
+        else:
+            E = pd.to_numeric(df["E_Classical"], errors="coerce").to_numpy()
+            W = pd.to_numeric(df["Occur_E_Classical"], errors="coerce").to_numpy()
+        m = np.isfinite(E) & np.isfinite(W) & (W >= 0)
+        return E[m], W[m]
+
+    def fit_closed_peak_area_PIE(E, W, edges, fit_range):
+        """Return 'a' (counts) by fitting a Gaussian to the PIE histogram within fit_range."""
+        counts, _ = np.histogram(E, bins=edges, weights=W, density=False)
+        bw = np.diff(edges)[0]
+        x = 0.5 * (edges[:-1] + edges[1:])
+        y = counts / bw  # counts per E unit
+        rmin, rmax = fit_range
+        m = (x >= rmin) & (x <= rmax) & np.isfinite(y)
+        if m.sum() < 5 or y[m].max() <= 0:
+            return np.nan, (x, y), None
+        xs, ys = x[m], y[m]
+        y0_0 = max(1e-6, np.percentile(ys, 10))
+        mu_0 = xs[np.argmax(ys)]
+        sigma_0 = max(0.5 * bw, (np.percentile(xs, 75) - np.percentile(xs, 25)) / 1.349)
+        A_0 = float(np.trapz(np.maximum(ys - y0_0, 0), xs))
+        xmin, xmax = xs.min(), xs.max()
+        sig_min = max(0.25 * bw, 1e-4)
+        sig_max = max(0.5, (xmax - xmin))
+        lower = [0.0, xmin, sig_min, 0.0]
+        upper = [ys.max() * 2 + 5.0, xmax, sig_max, np.inf]
+        try:
+            popt, _ = curve_fit(gaussian, xs, ys, p0=[y0_0, mu_0, sigma_0, max(A_0,1e-6)],
+                                bounds=(lower, upper), maxfev=100000)
+            return float(popt[3]), (x, y), popt  # A is area
+        except Exception:
+            return np.nan, (x, y), None
+
+    # ---- collect (condition, a, b) ----
+    rows = []
+    fit_figs = []
+    for f in files:
+        name = f.name
+        cond_val = parse_condition_value(name)
+        raw2 = f.getvalue().decode("utf-8", errors="ignore")
+        blks = split_numeric_blocks_with_headers(raw2)
+        cand = [i for i,(df,_,_,_) in enumerate(blks) if blks[i][0].shape[1] >= 8]
+        if not cand:
+            continue
+        chosen = int(pref_blk) if int(pref_blk) in cand else cand[0]
+        df8 = blks[chosen][0]
+        # PIE closed peak
+        E_pie, W_pie = read_E_and_W_from_8col(df8, True)
+        if user_edges is None:
+            nb = auto_bins(E_pie, rule=rule) if bin_mode == "Auto (rule)" else 80
+            edges_pie = np.linspace(float(np.nanmin(E_pie)), float(np.nanmax(E_pie)), nb + 1)
+        else:
+            edges_pie = user_edges
+        a_counts, (xpie, ypie), popt = fit_closed_peak_area_PIE(E_pie, W_pie, edges_pie, closed_region)
+
+        # Classical total
+        E_cl, W_cl = read_E_and_W_from_8col(df8, False)
+        if user_edges is None:
+            nb2 = auto_bins(E_cl, rule=rule) if bin_mode == "Auto (rule)" else 80
+            edges_cl = np.linspace(float(np.nanmin(E_cl)), float(np.nanmax(E_cl)), nb2 + 1)
+        else:
+            edges_cl = user_edges
+        counts_cl, _ = np.histogram(E_cl, bins=edges_cl, weights=W_cl, density=False)
+        b_counts = float(np.nansum(counts_cl))
+        rows.append(dict(file=name, condition=cond_val, block=chosen, a=a_counts, b=b_counts))
+
+        # plot per file
+        if show_fit_plots:
+            fig = go.Figure()
+            cts_pie, _ = np.histogram(E_pie, bins=edges_pie, weights=W_pie, density=False)
+            cx = 0.5 * (edges_pie[:-1] + edges_pie[1:])
+            fig.add_bar(x=cx, y=cts_pie, width=np.diff(edges_pie), name="PIE counts", opacity=0.5)
+            if np.isfinite(a_counts) and popt is not None:
+                xs = np.linspace(edges_pie[0], edges_pie[-1], 800)
+                y_fit_density = gaussian(xs, *popt)
+                y_fit_counts = y_fit_density * np.diff(edges_pie)[0]
+                fig.add_scatter(x=xs, y=y_fit_counts, mode="lines",
+                                name=f"Gaussian fit (a≈{a_counts:.0f} counts)")
+            fig.add_vrect(x0=closed_region[0], x1=closed_region[1],
+                          fillcolor="salmon", opacity=0.25, line_width=0)
+            fig.update_layout(title=name, xaxis_title="E", yaxis_title="Counts",
+                              margin=dict(l=40, r=10, t=40, b=40))
+            fit_figs.append(fig)
+
+    if not rows:
+        st.warning("No valid datasets found.")
+        st.stop()
+
+    df = pd.DataFrame(rows).sort_values("condition")
+    # reference = first (or smallest)
+    ref_idx = df["condition"].fillna(np.inf).argmin()
+    a0, b0 = df.iloc[ref_idx][["a","b"]]
+    df["a_over_b"] = df["a"] / df["b"]
+    df["fraction_norm"] = df["a_over_b"] * (b0 / a0) if (a0>0 and b0>0) else np.nan
+
+    st.markdown("**Summary of a, b, a/b, and normalized fraction**")
+    st.dataframe(df, use_container_width=True)
+    st.download_button("Download (CSV)", df.to_csv(index=False).encode(),
+                       "population_ratio_summary.csv", "text/csv", key="ratio_dl")
+
+    # plots
+    if df["condition"].notna().any():
+        fig1 = go.Figure()
+        fig1.add_scatter(x=df["condition"], y=df["a_over_b"], mode="lines+markers", name="a/b")
+        fig1.update_layout(xaxis_title=x_label, yaxis_title="a/b", title="a/b vs condition")
+        st.plotly_chart(fig1, use_container_width=True, key="ratio_plot1")
+
+        fig2 = go.Figure()
+        fig2.add_scatter(x=df["condition"], y=df["fraction_norm"], mode="lines+markers",
+                         name="(a/b)*(b₀/a₀)")
+        fig2.update_layout(xaxis_title=x_label, yaxis_title="Fraction (normalized)",
+                           title="Normalized fraction vs condition")
+        st.plotly_chart(fig2, use_container_width=True, key="ratio_plot2")
+
+    if show_fit_plots and fit_figs:
+        st.markdown("**PIE histograms with Gaussian fits (closed peak)**")
+        for i, fig in enumerate(fit_figs):
+            st.plotly_chart(fig, use_container_width=True, key=f"ratio_fitfig_{i}")
+
