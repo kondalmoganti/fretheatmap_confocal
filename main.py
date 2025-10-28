@@ -940,6 +940,29 @@ with tabs[4]:
         except Exception:
             return np.nan, (x, y), None
 
+        # Explanation / guide for users
+    with st.expander("ℹ️ What do a, b, a/b, and normalized fraction mean?"):
+        st.markdown("""
+        **a** → *Area of the high-FRET (closed-state) population*  
+        • Calculated by fitting a Gaussian to the **PIE FRET** histogram within the selected high-E region  
+        • Represents the number of molecules in the **closed conformation**
+
+        **b** → *Total area under the classical FRET histogram*  
+        • Sum of all counts (both open + closed states)  
+        • Represents the total number of detected FRET molecules
+
+        **a / b** → *Fraction of closed population*  
+        • Ratio of closed molecules to total molecules for that condition
+
+        **Normalized fraction** → *(a/b) × (b₀/a₀)*  
+        • Scales each dataset to the reference condition (usually the lowest or 0 M)  
+        • The reference has value = 1.0; smaller values mean fewer molecules remain closed
+
+        💡 **Interpretation:**  
+        As your condition (e.g., denaturant concentration) increases, both `a/b` and the normalized fraction should decrease — showing the transition from a closed to an open state.
+        """)
+
+
     # ---- collect (condition, a, b) ----
     rows = []
     fit_figs = []
