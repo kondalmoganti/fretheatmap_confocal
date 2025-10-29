@@ -282,6 +282,7 @@ tabs = st.tabs(
 )
 
 # -------------------------
+# -------------------------
 # TAB 1: Joint view
 # -------------------------
 with tabs[0]:
@@ -322,7 +323,7 @@ with tabs[0]:
         )
         ny, nx = Mplot.shape  # rows=S, cols=E
 
-        # default uniform edges & centers for the heatmap grid
+        # uniform edges & centers for the heatmap grid (0–1)
         e_edges_hm = np.linspace(0, 1, nx + 1); e_centers_hm = 0.5 * (e_edges_hm[:-1] + e_edges_hm[1:])
         s_edges_hm = np.linspace(0, 1, ny + 1); s_centers_hm = 0.5 * (s_edges_hm[:-1] + s_edges_hm[1:])
 
@@ -332,7 +333,7 @@ with tabs[0]:
             "Occur._S_Classical","S_Classical","Occur._S_PIE","S_PIE",
             "E_Classical","Occur._E_Classical","E_PIE","Occur._E_PIE",
         ]
-        extra = [f"Extra_{i}" for i in range(max(0, tbl.shape[1] - 8))]
+        extra = [f"Extra_{i}" for i in range(max(0, tbl.shape[1] - 8))] 
         tbl.columns = base + extra
 
         def col(name): return pd.to_numeric(tbl[name], errors="coerce").to_numpy()
@@ -354,7 +355,7 @@ with tabs[0]:
             if a.ndim != 1 or a.size < 2:
                 nb = max(2, int(nbins) if nbins else 40)
                 return np.linspace(float(rng[0]), float(rng[1]), nb + 1)
-            if np.all(np.diff(a) > 0):  # looks like edges already
+            if np.all(np.diff(a) > 0):  # already edges
                 return a
             if a.size >= 3:  # centers -> edges
                 d = np.diff(a)
@@ -417,7 +418,18 @@ with tabs[0]:
         if which in ("Classical", "Both"): add_hist_top(e_x, e_hist_cl, "Classical E")
         if which in ("PIE", "Both"):       add_hist_top(e_x, e_hist_pie, "PIE E")
 
-        figj.add_trace(go.Heatmap(z=Mplot, coloraxis="coloraxis", showscale=True), row=2, col=1)
+        # >>> Heatmap now uses real E/S coordinates (0–1)
+        figj.add_trace(
+            go.Heatmap(
+                z=Mplot,
+                x=e_centers_hm,    # E centers
+                y=s_centers_hm,    # S centers
+                coloraxis="coloraxis",
+                showscale=True,
+                zsmooth=False
+            ),
+            row=2, col=1
+        )
 
         def add_hist_right(yc, xc, name):
             if style == "Bars":
@@ -429,10 +441,14 @@ with tabs[0]:
         if which in ("Classical", "Both"): add_hist_right(s_y, s_hist_cl, "Classical S")
         if which in ("PIE", "Both"):       add_hist_right(s_y, s_hist_pie, "PIE S")
 
-        # link axes when matching grid
+        # link axes + lock ranges when matching grid
         if match_bins:
-            figj.update_xaxes(matches="x", row=1, col=1)
-            figj.update_yaxes(matches="y", row=2, col=2)
+            # Share E axis (top & heatmap) and lock to [0,1]
+            figj.update_xaxes(matches="x", range=[0, 1], row=1, col=1)
+            figj.update_xaxes(matches="x", range=[0, 1], row=2, col=1)
+            # Lock S to [0,1] for heatmap and right marginal
+            figj.update_yaxes(range=[0, 1], row=2, col=1)
+            figj.update_yaxes(range=[0, 1], row=2, col=2)
 
         figj.update_xaxes(title_text="E (0–1)", row=2, col=1)
         figj.update_yaxes(title_text="S (0–1)", row=2, col=1)
